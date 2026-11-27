@@ -1,0 +1,66 @@
+# Competition contract synchronized with train_and_export.ipynb (v3.0.0+7880385f)
+competition:
+  name: AIInAction RoboTaxi Data Centric Competition
+  notebook_path: train_and_export.ipynb
+  notebook_version: "3.0.0+7880385f"
+  detscore_version: "0.2.0"
+  team_id: 0  # TODO: Cap nhat TEAM_ID (seed) chinh thuc cua doi
+  model_allowed:
+    - yolo26n-seg
+  imgsz: 640
+  max_det: 100
+  max_zip_mb: 42.0
+  max_uncompressed_mb: 45.0
+  min_gt_area_px: 64.0
+  min_gt_per_class_per_split: 10
+
+pinned_packages:
+  ultralytics: "8.4.214"
+  onnx: "1.23.2"
+  onnxslim: "0.1.99"
+  onnxruntime: "1.32.0"
+
+export_contract:
+  format: onnx
+  imgsz: 640
+  opset: 17
+  simplify: true
+  dynamic: false
+  batch: 1
+
+qc_thresholds:
+  dup_hamming_max: 2
+  min_train_instances: 100
+  max_imbalance_ratio: 30.0
+  duplicate_mask_iou: 0.85
+  rider_leak_iou: 0.10
+  sign_pole_aspect_ratio: 3.5
+  trailer_merged_min_width_norm: 0.50
+  trailer_merged_aspect_ratio: 2.5
+  light_bulb_tiny_px_640: 144.0
+
+classes:
+  - Car
+  - Bus
+  - Truck
+  - Other vehicle
+  - Motorcycle
+  - Motorcyclist
+  - Bicycle
+  - Cyclist
+  - Pedestrian
+  - Sign
+  - Traffic light
+
+class_display_vi:
+  Car: "Ô tô con"
+  Bus: "Xe buýt / xe khách"
+  Truck: "Xe tải"
+  Other vehicle: "Phương tiện khác"
+  Motorcycle: "Xe máy (không người)"
+  Motorcyclist: "Xe máy (có người)"
+  Bicycle: "Xe đạp (không người)"
+  Cyclist: "Xe đạp (có người)"
+  Pedestrian: "Người đi bộ"
+  Sign: "Biển báo"
+  Traffic light: "Đèn giao thông"

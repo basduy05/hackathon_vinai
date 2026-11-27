@@ -1,0 +1,29 @@
+project: AIInAction RoboTaxi Data Centric Competition
+model_fixed: yolo26n-seg
+imgsz: 640
+metric: "100 * mask_map_50_95"
+current_phase: 1
+submission_budget:
+  total: 20
+  used: 0
+  private_selected: []
+
+phases:
+  phase_1_foundation:
+    status: in_progress
+    deliverables:
+      - configs/competition.yaml
+      - configs/class_mapping.yaml
+      - src/selfcheck_bridge.py
+      - src/validate_dataset.py
+      - src/export_verify_onnx.py
+  phase_2_data_pipelines:
+    status: pending
+  phase_3_golden_val_baseline:
+    status: pending
+  phase_4_datacentric_loops:
+    status: pending
+  phase_5_finalize_and_slides:
+    status: pending
+
+experiments: []

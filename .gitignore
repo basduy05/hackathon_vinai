@@ -1,0 +1,26 @@
+# Raw & staged datasets (too large for git)
+data/raw/*
+!data/raw/.gitkeep
+data/staged/*
+!data/staged/.gitkeep
+!data/staged/ambiguity_queue/.gitkeep
+data/golden_val/*
+!data/golden_val/.gitkeep
+data/master/*
+!data/master/.gitkeep
+
+# Training / verification artifacts
+work/
+runs/
+*.pt
+*.onnx
+*.cache
+submission*.zip
+du_lieu*.zip
+
+# Python & IDE
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ipynb_checkpoints/

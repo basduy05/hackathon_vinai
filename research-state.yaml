@@ -35,6 +35,9 @@ phases:
       - src/augment_and_crop.py
       - src/eval_golden.py
       - src/build_master.py
+      - src/kaggle_adapter.py
+      - src/benchmark_report.py
+      - kaggle_team34_pipeline.ipynb
       - tests/test_phase2.py
   phase_3_golden_val_baseline:
     status: in_progress

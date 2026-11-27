@@ -214,7 +214,7 @@ def generate_weather_dataset(
 
 
 def generate_copypaste_dataset(
-    bank_dir: Path,
+    bank_dir: Path | list[Path],
     bg_dir: Path,
     out_dir: Path,
     split: str = "train",
@@ -230,15 +230,16 @@ def generate_copypaste_dataset(
     imgsz = int(cfg["competition"]["imgsz"])
     rng = random.Random(seed)
 
-    bank_img_dir = bank_dir / "images" / split if (bank_dir / "images" / split).is_dir() else (bank_dir / "images")
-    bank_lbl_dir = bank_dir / "labels" / split if (bank_dir / "labels" / split).is_dir() else (bank_dir / "labels")
-
-    # Build lightweight bank of (img_path, cls, norm_pts)
+    # Combine all eligible banks without staging additional image copies.
+    bank_dirs = [bank_dir] if isinstance(bank_dir, Path) else list(bank_dir)
     bank_items: list[tuple[Path, int, np.ndarray]] = []
-    for img_p in sorted(p for p in bank_img_dir.rglob("*") if p.is_file() and p.suffix.lower() in IMG_EXTS):
-        for it in read_yolo_seg_file(bank_lbl_dir / f"{img_p.stem}.txt"):
-            if it.cls in rare_classes:
-                bank_items.append((img_p, it.cls, it.pts))
+    for root in bank_dirs:
+        bank_img_dir = root / "images" / split if (root / "images" / split).is_dir() else root / "images"
+        bank_lbl_dir = root / "labels" / split if (root / "labels" / split).is_dir() else root / "labels"
+        for img_p in sorted(p for p in bank_img_dir.rglob("*") if p.is_file() and p.suffix.lower() in IMG_EXTS):
+            for it in read_yolo_seg_file(bank_lbl_dir / f"{img_p.stem}.txt"):
+                if it.cls in rare_classes:
+                    bank_items.append((img_p, it.cls, it.pts))
     if not bank_items:
         return {"mode": "copy-paste", "images_written": 0, "pasted_instances": 0, "reason": "empty_instance_bank"}
 
@@ -253,7 +254,11 @@ def generate_copypaste_dataset(
     out_img_dir.mkdir(parents=True, exist_ok=True)
     out_lbl_dir.mkdir(parents=True, exist_ok=True)
 
-    # Cache loaded bank images lightly if small, else read on demand
+    # Sample classes uniformly first so large Sign banks cannot overwhelm Cyclist.
+    bank_by_class = {}
+    for item in bank_items:
+        bank_by_class.setdefault(item[1], []).append(item)
+    available_classes = sorted(bank_by_class)
     images_written = total_pasted = 0
     for out_idx in range(n_output):
         bg_path = rng.choice(bg_imgs)
@@ -268,7 +273,7 @@ def generate_copypaste_dataset(
         for _ in range(k_pastes * 3):
             if pasted_here >= k_pastes:
                 break
-            src_img_p, cls_id, src_pts = rng.choice(bank_items)
+            src_img_p, cls_id, src_pts = rng.choice(bank_by_class[rng.choice(available_classes)])
             src_bgr = read_image_bgr(src_img_p)
             sh, sw = src_bgr.shape[:2]
             src_mask = rasterize_norm_polygon(src_pts, sw, sh)
@@ -332,7 +337,8 @@ def generate_copypaste_dataset(
             images_written += 1
 
     write_data_yaml(out_dir, cfg["classes"], has_val=(out_dir / "images" / "val").is_dir())
-    return {"mode": "copy-paste", "images_written": images_written, "pasted_instances": total_pasted}
+    return {"mode": "copy-paste", "images_written": images_written, "pasted_instances": total_pasted,
+            "bank_instances_per_class": {str(c): len(items) for c, items in bank_by_class.items()}}
 
 
 def main() -> int:

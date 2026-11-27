@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
+from collections import Counter
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import cv2
 import numpy as np
@@ -283,6 +285,8 @@ def run_eval_or_qc(
     conf_thr: float = 0.25,
     high_conf_thr: float = 0.70,
     exp_name: str | None = None,
+    max_images: int | None = None,
+    seed: int = 39,
 ) -> dict[str, Any]:
     """Evaluate ONNX model using ``detscore_selfcheck`` (or fallback) and write diagnostic JSONs."""
     cfg = load_competition_config(competition_path)
@@ -292,6 +296,8 @@ def run_eval_or_qc(
     image_paths = sc.infer.list_images(images_dir)
     if not image_paths:
         raise FileNotFoundError(f"No images found in {images_dir}")
+    if max_images is not None and len(image_paths) > max_images:
+        image_paths = sorted(random.Random(seed).sample(image_paths, max_images))
 
     out_dir.mkdir(parents=True, exist_ok=True)
     infer_res = sc.infer.run_images(model_path, image_paths, params, threads=2)
@@ -377,6 +383,243 @@ def run_eval_or_qc(
             state_path.write_text(yaml.safe_dump(state, sort_keys=False, allow_unicode=True), encoding="utf-8")
 
     return report
+
+
+# Pre-train zero-shot semantic rules flagging inverted class mappings before GPU training.
+# COCO-80 has no autorickshaw/trailer/caravan class, so Other vehicle (3) matches to
+# car/truck/bus are tracked as soft review notes instead of hard blocks, while person/bicycle
+# matches on Other vehicle remain hard contradictions.
+_SEMANTIC_CONTRADICTIONS: dict[int, set[str]] = {
+    0: {"motorcycle", "bicycle", "person"},               # Car GT should not match motorbike/bicycle/person
+    1: {"motorcycle", "bicycle", "person"},               # Bus GT should not match motorbike/bicycle
+    2: {"motorcycle", "bicycle", "person"},               # Truck GT should not match motorbike/bicycle
+    3: {"person", "bicycle"},                             # Other vehicle GT should not match pedestrian/bicycle
+    4: {"car", "bus", "truck"},                           # Motorcycle GT should not match 4-wheel vehicles
+    5: {"car", "bus", "truck"},                           # Motorcyclist GT should not match vans/cars/trucks
+    6: {"car", "bus", "truck"},                           # Bicycle GT should not match 4-wheel vehicles
+    7: {"car", "bus", "truck"},                           # Cyclist GT should not match 4-wheel vehicles
+}
+
+_SEMANTIC_SOFT_WARNINGS: dict[int, set[str]] = {
+    3: {"car", "truck", "bus"},                           # Expected zero-shot confusion on autorickshaw/trailer/fallback
+}
+
+
+def check_semantic_consistency_against_coco(
+    samples: list[dict[str, Any]],
+    classes: list[str],
+    min_conf: float = 0.45,
+    min_iou: float = 0.60,
+    max_contradiction_rate: float = 0.25,
+    min_matches: int = 3,
+) -> dict[str, Any]:
+    """Check GT annotations against zero-shot COCO predictions to catch class-ID corruption early.
+
+    Each item in ``samples`` has keys ``image``, ``gt`` (``[(cls_id, norm_bbox), ...]``),
+    and ``coco_pred`` (``[(coco_label_str, conf, norm_bbox), ...]``).
+    """
+    matched_per_cls: Counter[int] = Counter()
+    contradict_per_cls: Counter[int] = Counter()
+    soft_warn_per_cls: Counter[int] = Counter()
+    by_pair: Counter[str] = Counter()
+    soft_by_pair: Counter[str] = Counter()
+    examples: list[dict[str, Any]] = []
+
+    for rec in samples:
+        gt_items = rec.get("gt", [])
+        preds = [p for p in rec.get("coco_pred", []) if float(p[1]) >= min_conf]
+        for g_cls, g_box in gt_items:
+            if g_cls not in _SEMANTIC_CONTRADICTIONS:
+                continue
+            best_iou = 0.0
+            best_name = ""
+            for p_name, _p_conf, p_box in preds:
+                iou = bbox_iou(g_box, p_box)
+                if iou > best_iou:
+                    best_iou = iou
+                    best_name = str(p_name).strip().lower()
+            if best_iou < min_iou or not best_name:
+                continue
+            matched_per_cls[g_cls] += 1
+            pair_key = f"GT:{classes[g_cls]} == COCO:{best_name}"
+            if best_name in _SEMANTIC_CONTRADICTIONS.get(g_cls, set()):
+                contradict_per_cls[g_cls] += 1
+                by_pair[pair_key] += 1
+                if len(examples) < 25:
+                    examples.append({"image": rec.get("image", ""), "pair": pair_key, "iou": round(best_iou, 3)})
+            elif best_name in _SEMANTIC_SOFT_WARNINGS.get(g_cls, set()):
+                soft_warn_per_cls[g_cls] += 1
+                soft_by_pair[pair_key] += 1
+
+    total_matches = sum(matched_per_cls.values())
+    total_contra = sum(contradict_per_cls.values())
+    overall_rate = (total_contra / total_matches) if total_matches else 0.0
+
+    alerts: list[str] = []
+    soft_warnings: list[str] = []
+    for cid, m_cnt in sorted(matched_per_cls.items()):
+        c_cnt = contradict_per_cls[cid]
+        if m_cnt >= 3 and (c_cnt / m_cnt) > max_contradiction_rate:
+            alerts.append(
+                f"CRITICAL CLASS CORRUPTION on '{classes[cid]}': {c_cnt}/{m_cnt} "
+                f"({c_cnt / m_cnt:.0%}) matched contradictory COCO objects!"
+            )
+        w_cnt = soft_warn_per_cls[cid]
+        if w_cnt >= 3:
+            soft_warnings.append(
+                f"REVIEW NOTE on '{classes[cid]}': {w_cnt}/{m_cnt} ({w_cnt / m_cnt:.0%}) matched "
+                f"COCO car/truck/bus (expected for autorickshaw/trailer absent from COCO; verify in preview_per_class.jpg)."
+            )
+
+    if total_matches < min_matches:
+        alerts.append(f"INSUFFICIENT_EVIDENCE: only {total_matches} COCO matches; need {min_matches}")
+    ok = len(alerts) == 0 and overall_rate <= max_contradiction_rate
+    return {
+        "ok": ok,
+        "status": "pass" if ok else ("insufficient_evidence" if total_matches < min_matches else "fail"),
+        "checked_images": len(samples),
+        "total_matches": total_matches,
+        "contradictions": total_contra,
+        "contradiction_rate": round(overall_rate, 4),
+        "by_pair": dict(by_pair),
+        "soft_by_pair": dict(soft_by_pair),
+        "alerts": alerts,
+        "soft_warnings": soft_warnings,
+        "examples": examples,
+    }
+
+
+def run_pretrain_semantic_sanity_check(
+    dataset_dir: Path,
+    split: str = "train",
+    sample_images: int = 48,
+    seed: int = 39,
+    weights: str = "yolo26n-seg.pt",
+    max_contradiction_rate: float = 0.25,
+    competition_path: Path = Path("configs/competition.yaml"),
+    coco_predictor: Callable[[np.ndarray], list[tuple[str, float, tuple[float, float, float, float]]]] | None = None,
+) -> dict[str, Any]:
+    """Run pretrained COCO model on sampled dataset images to block inverted class maps before training."""
+    cfg = load_competition_config(competition_path)
+    classes: list[str] = cfg["classes"]
+    img_dir = dataset_dir / "images" / split if (dataset_dir / "images" / split).is_dir() else (dataset_dir / "images")
+    lbl_dir = dataset_dir / "labels" / split if (dataset_dir / "labels" / split).is_dir() else (dataset_dir / "labels")
+
+    imgs = sorted(p for p in img_dir.rglob("*") if p.is_file() and p.suffix.lower() in IMG_EXTS)
+    rng = random.Random(seed)
+    # Sample balanced across classes so rare classes (3, 5, 1, 7) are audited
+    by_cls: dict[int, list[Path]] = {}
+    for p in imgs:
+        insts = read_yolo_seg_file(lbl_dir / f"{p.stem}.txt")
+        for it in insts:
+            by_cls.setdefault(it.cls, []).append(p)
+    if by_cls and not (set(by_cls) & set(_SEMANTIC_CONTRADICTIONS)):
+        return {"ok": None, "status": "not_applicable", "checked_images": 0,
+                "alerts": [], "reason": "COCO contradiction rules cover vehicle classes 0..7 only; visual audit required"}
+    picked: list[Path] = []
+    seen_p: set[Path] = set()
+    for cid in (3, 5, 1, 2, 7, 6, 4, 8, 9, 10, 0):
+        cands = by_cls.get(cid, [])
+        rng.shuffle(cands)
+        for p in cands[: max(3, sample_images // 8)]:
+            if p not in seen_p:
+                seen_p.add(p)
+                picked.append(p)
+    if len(picked) < min(sample_images, len(imgs)):
+        rest = [p for p in imgs if p not in seen_p]
+        rng.shuffle(rest)
+        picked.extend(rest[: sample_images - len(picked)])
+    picked = picked[:sample_images]
+
+    if coco_predictor is None:
+        from ultralytics import YOLO  # noqa: PLC0415
+
+        coco_model = YOLO(weights)
+
+        def _predict_fn(bgr: np.ndarray) -> list[tuple[str, float, tuple[float, float, float, float]]]:
+            ih, iw = bgr.shape[:2]
+            res = coco_model.predict(bgr, conf=0.40, imgsz=640, verbose=False)[0]
+            if res.boxes is None:
+                return []
+            xyxy = res.boxes.xyxy.cpu().numpy()
+            confs = res.boxes.conf.cpu().numpy()
+            cids = res.boxes.cls.cpu().numpy().astype(int)
+            out_preds = []
+            for b, cf, c in zip(xyxy, confs, cids):
+                nm = str(coco_model.names[int(c)]).strip().lower()
+                out_preds.append((nm, float(cf), (float(b[0]) / iw, float(b[1]) / ih, float(b[2]) / iw, float(b[3]) / ih)))
+            return out_preds
+
+        coco_predictor = _predict_fn
+
+    samples: list[dict[str, Any]] = []
+    for p in picked:
+        raw = np.fromfile(str(p), dtype=np.uint8)
+        bgr = cv2.imdecode(raw, cv2.IMREAD_COLOR)
+        if bgr is None:
+            continue
+        insts = read_yolo_seg_file(lbl_dir / f"{p.stem}.txt")
+        samples.append({
+            "image": p.name,
+            "gt": [(it.cls, it.bbox) for it in insts],
+            "coco_pred": coco_predictor(bgr),
+        })
+    return check_semantic_consistency_against_coco(samples, classes, max_contradiction_rate=max_contradiction_rate)
+
+
+def render_per_class_preview_grid(
+    dataset_dir: Path,
+    out_path: Path,
+    split: str = "train",
+    samples_per_class: int = 4,
+    cell_w: int = 320,
+    cell_h: int = 192,
+    seed: int = 39,
+    competition_path: Path = Path("configs/competition.yaml"),
+) -> Path:
+    """Render an 11-row class verification sheet highlighting only each row's target class."""
+    cfg = load_competition_config(competition_path)
+    classes: list[str] = cfg["classes"]
+    img_dir = dataset_dir / "images" / split if (dataset_dir / "images" / split).is_dir() else (dataset_dir / "images")
+    lbl_dir = dataset_dir / "labels" / split if (dataset_dir / "labels" / split).is_dir() else (dataset_dir / "labels")
+
+    by_cls: dict[int, list[Path]] = {c: [] for c in range(len(classes))}
+    for p in sorted(img_dir.rglob("*")):
+        if not (p.is_file() and p.suffix.lower() in IMG_EXTS):
+            continue
+        present = {it.cls for it in read_yolo_seg_file(lbl_dir / f"{p.stem}.txt")}
+        for cid in present:
+            if cid in by_cls:
+                by_cls[cid].append(p)
+
+    rng = random.Random(seed)
+    canvas = np.full((len(classes) * cell_h, samples_per_class * cell_w, 3), 28, dtype=np.uint8)
+    for cid, cname in enumerate(classes):
+        cands = by_cls[cid]
+        chosen = rng.sample(cands, min(samples_per_class, len(cands))) if cands else []
+        for col in range(samples_per_class):
+            y0, x0 = cid * cell_h, col * cell_w
+            tile = np.full((cell_h, cell_w, 3), 38, dtype=np.uint8)
+            if col < len(chosen):
+                p = chosen[col]
+                bgr = cv2.imdecode(np.fromfile(str(p), dtype=np.uint8), cv2.IMREAD_COLOR)
+                if bgr is not None:
+                    ih, iw = bgr.shape[:2]
+                    tile = cv2.resize(bgr, (cell_w, cell_h))
+                    for it in read_yolo_seg_file(lbl_dir / f"{p.stem}.txt"):
+                        if it.cls != cid:
+                            continue
+                        pts = np.round(it.pts * np.array([cell_w, cell_h])).astype(np.int32)
+                        cv2.polylines(tile, [pts], True, (0, 255, 100), 2)
+            cv2.rectangle(tile, (0, 0), (cell_w, 22), (0, 0, 0), -1)
+            cv2.putText(tile, f"{cid}: {cname}" if chosen else f"{cid}: {cname} (EMPTY!)", (6, 16), 0, 0.52, (0, 255, 160) if chosen else (80, 80, 255), 1)
+            canvas[y0 : y0 + cell_h, x0 : x0 + cell_w] = tile
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    ok, buf = cv2.imencode(out_path.suffix or ".jpg", canvas, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
+    if ok:
+        out_path.write_bytes(buf.tobytes())
+    return out_path
 
 
 def main() -> int:

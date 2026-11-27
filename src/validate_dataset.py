@@ -372,10 +372,18 @@ def run_qc(data_dir: Path, cfg: dict[str, Any], out_dir: Path | None = None) -> 
         raise FileNotFoundError(f"No images found under {data_dir}")
 
     per_class = {
-        c: {"instances": 0, "images": 0, "tiny_lt_64px": 0, "by_split": defaultdict(int)}
+        c: {
+            "instances": 0,
+            "images": 0,
+            "tiny_lt_64px": 0,
+            "gt_half_frame": 0,
+            "area_buckets": {"lt_64": 0, "64_256": 0, "256_1024": 0, "gt_1024": 0},
+            "by_split": defaultdict(int),
+        }
         for c in classes
     }
     split_stats: dict[str, dict[str, int]] = {}
+    by_split_ambiguity: dict[str, dict[str, Any]] = {}
     fatal: list[str] = []
     poly_issues: list[str] = []
     ambiguity_queue: list[dict[str, Any]] = []
@@ -384,6 +392,7 @@ def run_qc(data_dir: Path, cfg: dict[str, Any], out_dir: Path | None = None) -> 
 
     for split_name, pairs in splits_map.items():
         n_inst = n_empty = 0
+        split_ambig: list[dict[str, Any]] = []
         for img_path, lbl_path in pairs:
             rel_str = f"{split_name}/{img_path.name}"
             if lbl_path is None:
@@ -399,15 +408,28 @@ def run_qc(data_dir: Path, cfg: dict[str, Any], out_dir: Path | None = None) -> 
                 cname = classes[it.cls]
                 per_class[cname]["instances"] += 1
                 per_class[cname]["by_split"][split_name] += 1
-                if it.area_640 < min_area_px:
+                a640 = it.area_640
+                if a640 < min_area_px:
                     per_class[cname]["tiny_lt_64px"] += 1
+                    per_class[cname]["area_buckets"]["lt_64"] += 1
+                elif a640 < 256.0:
+                    per_class[cname]["area_buckets"]["64_256"] += 1
+                elif a640 < 1024.0:
+                    per_class[cname]["area_buckets"]["256_1024"] += 1
+                else:
+                    per_class[cname]["area_buckets"]["gt_1024"] += 1
+                bx1, by1, bx2, by2 = it.bbox
+                if (bx2 - bx1) * (by2 - by1) > 0.45:
+                    per_class[cname]["gt_half_frame"] += 1
                 seen_cls.add(cname)
             for cname in seen_cls:
                 per_class[cname]["images"] += 1
             if not insts:
                 n_empty += 1
             n_inst += len(insts)
-            ambiguity_queue.extend(detect_edge_case_flags(insts, qc_thr, rel_str))
+            img_flags = detect_edge_case_flags(insts, qc_thr, rel_str)
+            split_ambig.extend(img_flags)
+            ambiguity_queue.extend(img_flags)
             records.append({
                 "split": split_name,
                 "name": img_path.name,
@@ -415,6 +437,10 @@ def run_qc(data_dir: Path, cfg: dict[str, Any], out_dir: Path | None = None) -> 
                 "dhash": dhash64(img_path),
             })
         split_stats[split_name] = {"images": len(pairs), "empty_images": n_empty, "instances": n_inst}
+        by_split_ambiguity[split_name] = {
+            "count": len(split_ambig),
+            "flags": dict(Counter(item["flag"] for item in split_ambig)),
+        }
 
     # Duplicate & cross-split leakage
     by_sha: dict[str, list[int]] = defaultdict(list)
@@ -444,6 +470,8 @@ def run_qc(data_dir: Path, cfg: dict[str, Any], out_dir: Path | None = None) -> 
             "instances": v["instances"],
             "images": v["images"],
             "tiny_lt_64px": v["tiny_lt_64px"],
+            "gt_half_frame": v["gt_half_frame"],
+            "area_buckets": dict(v["area_buckets"]),
             "by_split": dict(v["by_split"]),
         }
         for c, v in per_class.items()
@@ -466,6 +494,7 @@ def run_qc(data_dir: Path, cfg: dict[str, Any], out_dir: Path | None = None) -> 
             "leak_near": leak_near,
         },
         "edge_case_flag_counts": flag_counts,
+        "by_split_ambiguity": by_split_ambiguity,
         "ambiguity_queue_size": len(ambiguity_queue),
     }
 

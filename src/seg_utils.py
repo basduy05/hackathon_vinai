@@ -17,10 +17,10 @@ import cv2
 import numpy as np
 import yaml
 from PIL import Image, ImageOps
-from shapely.geometry import GeometryCollection, MultiPolygon, Polygon
-from shapely.ops import unary_union
+from shapely.geometry import GeometryCollection, LineString, MultiPolygon, Polygon
+from shapely.ops import nearest_points, unary_union
 
-from src.validate_dataset import IMG_EXTS, dhash64, make_shapely_polygon, polygon_area, sha256_file
+from src.validate_dataset import IMG_EXTS, dhash64, make_shapely_polygon, polygon_area, polygon_self_intersects, sha256_file
 
 
 @dataclass
@@ -34,8 +34,16 @@ class SegInstance:
 
     def __post_init__(self) -> None:
         self.pts = np.clip(np.asarray(self.pts, dtype=np.float64).reshape(-1, 2), 0.0, 1.0)
-        if self.geom is None and len(self.pts) >= 3:
-            self.geom = make_shapely_polygon(self.pts)
+        if len(self.pts) >= 3 and self.geom is None:
+            raw_poly = Polygon(self.pts)
+            if raw_poly.is_valid and not raw_poly.is_empty and raw_poly.area > 0 and not polygon_self_intersects(self.pts):
+                self.geom = raw_poly
+            else:
+                self.geom = make_shapely_polygon(self.pts)
+                repaired = largest_polygon_from_geom(self.geom)
+                if repaired is not None:
+                    self.pts = repaired
+                    self.geom = make_shapely_polygon(self.pts)
 
     @property
     def bbox(self) -> tuple[float, float, float, float]:
@@ -215,9 +223,21 @@ def merge_polygons_union(polys: Sequence[np.ndarray]) -> np.ndarray | None:
     poly = largest_polygon_from_geom(merged)
     if poly is not None and len(extract_polygons_from_shapely(merged)) == 1:
         return poly
-    # If rider and vehicle have a tiny sub-pixel gap in annotation, bridge via tiny dilation then erode
-    bridged = unary_union([g.buffer(0.004) for g in geoms]).buffer(-0.0035)
-    return largest_polygon_from_geom(bridged) or poly
+    # If rider and vehicle have a small gap, bridge via nearest_points neck (preserves tight silhouette)
+    acc = geoms[0]
+    for nxt in geoms[1:]:
+        if acc.intersects(nxt):
+            acc = unary_union([acc, nxt])
+        else:
+            p1, p2 = nearest_points(acc, nxt)
+            neck = LineString([p1, p2]).buffer(0.004)
+            acc = unary_union([acc, neck, nxt])
+    res = largest_polygon_from_geom(acc)
+    if res is not None:
+        return res
+    bridged = unary_union([g.buffer(0.005) for g in geoms]).buffer(-0.0045)
+    bridged_poly = largest_polygon_from_geom(bridged)
+    return bridged_poly if bridged_poly is not None else poly
 
 
 def write_data_yaml(dataset_dir: Path, classes: Sequence[str], has_val: bool = True) -> Path:

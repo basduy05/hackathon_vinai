@@ -15,3 +15,8 @@
 - Implementing Phase 2 modular data engineering & evaluation pipeline (`seg_utils.py`, `map_and_merge_public.py`, `box_to_mask_sam2.py`, `prepare_vn_frames.py`, `augment_and_crop.py`, `eval_golden.py`).
 - **Phase 2 Pipeline Verification**: Implemented `seg_utils.py`, `map_and_merge_public.py`, `box_to_mask_sam2.py`, `prepare_vn_frames.py`, `augment_and_crop.py`, `eval_golden.py`, `build_master.py`, and `tests/test_phase2.py`. All 8 unit tests (`test_phase1` + `test_phase2`) and `sample_data` Tier-1 QC passed.
 - **Environment check note**: Local Python 3.14.4 has `ultralytics==8.4.215`, `onnxruntime==1.29.0`, and lacks `pycocotools`; use `train_and_export.ipynb` pinned environment on Colab/Kaggle for final ONNX export (`8.4.214`) and official `detscore` evaluation.
+
+## 2026-11-27 11:45 — V2 Pipeline Upgrades (Post du_lieu_v1.zip QC Audit)
+- Diagnosed `du_lieu_v1.zip` QC report: `497 RIDER_LEAK` (727 Motorcycle vs 80 Motorcyclist), `10` self-intersecting polygons, `0` Other vehicle, `46` Sign.
+- Upgraded `seg_utils.py` (`SegInstance` auto-repair + `nearest_points` bridge), `map_and_merge_public.py` + `class_mapping.yaml` (added `bbox_iou + above_mounted` merger rule + `threewheel/van/motor/bike` aliases).
+- Added `src/kaggle_adapter.py` (6 Kaggle formats + HuggingFace Parquet loader) and `src/benchmark_report.py` (automated BTC-style Markdown + Matplotlib comparison reports), and rebuilt `kaggle_team34_pipeline.ipynb` V2.

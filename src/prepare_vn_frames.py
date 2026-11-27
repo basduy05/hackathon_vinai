@@ -25,7 +25,7 @@ from src.seg_utils import (
     write_image,
     write_yolo_seg_label,
 )
-from src.validate_dataset import IMG_EXTS, dhash64, load_competition_config
+from src.validate_dataset import IMG_EXTS, bbox_iou, dhash64, load_competition_config
 
 
 VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
@@ -166,6 +166,48 @@ def extract_frames_from_sources(
     }
 
 
+def _is_ego_hood_car(seg: SegInstance) -> bool:
+    """Detect dashcam ego-vehicle hood/dashboard false positives at bottom image edge."""
+    if seg.cls != 0:
+        return False
+    x1, y1, x2, y2 = seg.bbox
+    bw = x2 - x1
+    bh = y2 - y1
+    yc = 0.5 * (y1 + y2)
+    return y2 >= 0.94 and bw >= 0.32 and (yc >= 0.72 or (y1 >= 0.65 and bh <= 0.38))
+
+
+def _suppress_ped_overlapping_rider(instances: list[SegInstance]) -> list[SegInstance]:
+    """Drop spurious Pedestrian(8) labels sitting directly inside a merged Motorcyclist(5)/Cyclist(7)."""
+    riders = [it for it in instances if it.cls in (5, 7)]
+    if not riders:
+        return instances
+    out: list[SegInstance] = []
+    for it in instances:
+        if it.cls != 8:
+            out.append(it)
+            continue
+        rx1, ry1, rx2, ry2 = it.bbox
+        p_area = it.geom.area if it.geom is not None else max(1e-8, (rx2 - rx1) * (ry2 - ry1))
+        overlap_rider = False
+        for rd in riders:
+            if bbox_iou(it.bbox, rd.bbox) < 0.08:
+                continue
+            if it.geom is not None and rd.geom is not None:
+                inter = float(it.geom.intersection(rd.geom).area)
+            else:
+                dx1, dy1, dx2, dy2 = rd.bbox
+                ix = max(0.0, min(rx2, dx2) - max(rx1, dx1))
+                iy = max(0.0, min(ry2, dy2) - max(ry1, dy1))
+                inter = ix * iy
+            if inter / max(1e-8, p_area) >= 0.55:
+                overlap_rider = True
+                break
+        if not overlap_rider:
+            out.append(it)
+    return out
+
+
 def pseudo_label_folder(
     images_dir: Path,
     labels_out_dir: Path,
@@ -173,12 +215,16 @@ def pseudo_label_folder(
     source_mapping_name: str = "coco",
     mapping_path: Path = Path("configs/class_mapping.yaml"),
     competition_path: Path = Path("configs/competition.yaml"),
-    min_area_640: float = 40.0,
+    min_area_640: float = 20.0,
     low_conf_threshold: float = 0.45,
+    filter_ego_hood: bool = True,
+    filter_rider_ped_overlap: bool = True,
     registry_path: Path | None = None,
     dataset_name: str = "vn_dashcam_pseudolabel",
     dataset_url: str = "",
     license_name: str = "Open-source / CC",
+    post_merge_min_area_640: float = 36.0,
+    aux_sign_predictor: TeacherPredictor | None = None,
 ) -> dict[str, Any]:
     """Run teacher pseudo-labeling + Geometric Mask Merger and generate human review queue."""
     comp_cfg = load_competition_config(competition_path)
@@ -200,12 +246,15 @@ def pseudo_label_folder(
     labels_out_dir.mkdir(parents=True, exist_ok=True)
 
     review_queue: list[dict[str, Any]] = []
-    n_images = n_instances = n_merged = 0
+    n_images = n_instances = n_merged = n_hood_dropped = 0
 
     for img_path in sorted(p for p in images_dir.rglob("*") if p.is_file() and p.suffix.lower() in IMG_EXTS):
         img_bgr = read_image_bgr(img_path)
         h, w = img_bgr.shape[:2]
-        dets = predictor(img_bgr)
+        dets = list(predictor(img_bgr))
+        if aux_sign_predictor is not None:
+            dets.extend(d for d in aux_sign_predictor(img_bgr)
+                        if direct_map.get(d.label_name.strip().lower()) == 9)
         insts: list[SegInstance] = []
         low_conf_count = 0
 
@@ -214,6 +263,9 @@ def pseudo_label_folder(
             if key not in direct_map:
                 continue
             seg = SegInstance(cls=direct_map[key], pts=d.pts, source_label=key)
+            if filter_ego_hood and _is_ego_hood_car(seg):
+                n_hood_dropped += 1
+                continue
             if seg.area_640(w, h, imgsz) < min_area_640:
                 continue
             insts.append(seg)
@@ -224,6 +276,10 @@ def pseudo_label_folder(
             insts, ambig, mstats = apply_geometric_mask_merger(insts, merge_rules, rider_labels, img_path.name)
             n_merged += mstats["auto_merged"]
             review_queue.extend(ambig)
+            if filter_rider_ped_overlap:
+                insts = _suppress_ped_overlapping_rider(insts)
+
+        insts = [it for it in insts if it.area_640(w, h, imgsz) >= post_merge_min_area_640]
 
         if low_conf_count > 0:
             review_queue.append({
@@ -258,6 +314,7 @@ def pseudo_label_folder(
         "images_labeled": n_images,
         "instances_written": n_instances,
         "auto_merged_riders": n_merged,
+        "hood_cars_dropped": n_hood_dropped,
         "review_queue_size": len(review_queue),
         "review_queue_path": str(queue_path),
     }

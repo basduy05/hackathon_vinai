@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
+import time
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
@@ -138,31 +140,34 @@ def apply_geometric_mask_merger(
                 ix2, iy2 = min(rx2, bx2), min(ry2, by2)
                 inter_area = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
 
+            biou = bbox_iou(r_inst.bbox, b_inst.bbox)
             person_overlap = inter_area / max(1e-8, r_area)
             dx_ratio = abs(rcx - bcx) / bw
             above_or_inside = (ry2 >= by1 - 0.15 * bh) and (rcy <= by2 + 0.05 * bh)
             aligned = (dx_ratio <= float(rule["max_center_dx_ratio"])) and (
                 above_or_inside or not bool(rule.get("require_rider_above_or_inside", True))
             )
+            strict_dx = dx_ratio <= float(rule.get("auto_merge_max_dx_ratio", 0.60))
 
             auto_hit = aligned and (
                 iou >= float(rule["auto_merge_min_iou"])
                 or person_overlap >= float(rule["auto_merge_min_person_overlap"])
+                or (strict_dx and biou >= float(rule.get("auto_merge_min_bbox_iou", 0.08)))
             )
             ambig_hit = (not auto_hit) and aligned and (
-                person_overlap >= float(rule["ambiguity_min_person_overlap"]) or bbox_iou(r_inst.bbox, b_inst.bbox) >= 0.05
+                person_overlap >= float(rule["ambiguity_min_person_overlap"]) or biou >= 0.05
             )
-            score = iou + person_overlap
+            score = iou + person_overlap + 0.5 * biou
             if auto_hit and score > best_score:
                 best_score = score
                 best_bi = bi
                 best_status = "auto"
-                best_metrics = {"iou": iou, "person_overlap": person_overlap, "dx_ratio": dx_ratio}
+                best_metrics = {"iou": iou, "person_overlap": person_overlap, "bbox_iou": biou, "dx_ratio": dx_ratio}
             elif ambig_hit and best_status != "auto" and score > best_score:
                 best_score = score
                 best_bi = bi
                 best_status = "ambiguous"
-                best_metrics = {"iou": iou, "person_overlap": person_overlap, "dx_ratio": dx_ratio}
+                best_metrics = {"iou": iou, "person_overlap": person_overlap, "bbox_iou": biou, "dx_ratio": dx_ratio}
 
         if best_bi is not None and best_status == "auto":
             bike_groups[best_bi].append(ri)
@@ -207,17 +212,50 @@ def _parse_coco_dataset(
     ann_json: Path,
     images_root: Path,
     direct_map: dict[str, int],
+    max_images: int | None = None,
+    prioritize_classes: tuple[int, ...] = (3, 6, 7, 9, 10, 4, 1, 2),
+    seed: int = 39,
 ) -> list[dict[str, Any]]:
+    t0 = time.monotonic()
+    print(f"  [COCO] Đang nạp {ann_json.name}...", flush=True)
     data = json.loads(ann_json.read_text(encoding="utf-8"))
     cats = {int(c["id"]): str(c["name"]).strip().lower() for c in data.get("categories", [])}
+    cat_to_cls = {cid: int(direct_map[nm]) for cid, nm in cats.items() if nm in direct_map}
+
     anns_by_img: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    img_cls_set: dict[int, set[int]] = defaultdict(set)
     for ann in data.get("annotations", []):
         if ann.get("iscrowd", 0):
             continue
-        anns_by_img[int(ann["image_id"])].append(ann)
+        cid = int(ann["category_id"])
+        if cid not in cat_to_cls:
+            continue
+        iid = int(ann["image_id"])
+        anns_by_img[iid].append(ann)
+        img_cls_set[iid].add(cat_to_cls[cid])
+
+    im_candidates = [im for im in data.get("images", []) if int(im["id"]) in anns_by_img]
+    # Pre-select prioritized COCO images on lightweight metadata before decoding 800k+ polygons.
+    if max_images is not None and len(im_candidates) > max_images:
+        prio_set = set(prioritize_classes)
+        prio_ims, other_ims = [], []
+        for im in im_candidates:
+            clss = img_cls_set[int(im["id"])]
+            has_rider_pair = 8 in clss and bool(clss & {4, 6})
+            (prio_ims if ((clss & prio_set) or has_rider_pair) else other_ims).append(im)
+        rng = random.Random(seed)
+        rng.shuffle(prio_ims)
+        rng.shuffle(other_ims)
+        candidate_cap = max(int(max_images * 3), int(max_images) + 1000)
+        im_candidates = (prio_ims + other_ims)[:candidate_cap]
+    print(
+        f"  [COCO] Lọc nhanh còn {len(im_candidates)} ảnh ứng viên ({time.monotonic() - t0:.1f}s); đang giải mã polygon...",
+        flush=True,
+    )
 
     records: list[dict[str, Any]] = []
-    for im in data.get("images", []):
+    total_cands = len(im_candidates)
+    for idx, im in enumerate(im_candidates, start=1):
         img_id = int(im["id"])
         file_name = str(im["file_name"])
         img_path = images_root / file_name
@@ -236,6 +274,8 @@ def _parse_coco_dataset(
             if seg_inst is not None:
                 insts.append(seg_inst)
         records.append({"image_path": img_path, "width": w, "height": h, "instances": insts})
+        if total_cands >= 500 and (idx % 500 == 0 or idx == total_cands):
+            print(f"  [COCO] Đã giải mã {idx}/{total_cands} ảnh ({time.monotonic() - t0:.1f}s)", flush=True)
     return records
 
 
@@ -348,6 +388,8 @@ def convert_public_source(
     transfer_mode: str = "copy",
     weather_filter: set[str] | None = None,
     time_filter: set[str] | None = None,
+    prioritize_classes: tuple[int, ...] = (3, 6, 7, 9, 10, 4, 1, 2),
+    seed: int = 39,
     registry_path: Path | None = None,
     dataset_url: str = "",
     license_name: str = "",
@@ -368,13 +410,31 @@ def convert_public_source(
     merge_rules = map_cfg["geometric_merge_rules"]
 
     if fmt == "coco":
-        records = _parse_coco_dataset(labels_path, images_dir, direct_map)
+        records = _parse_coco_dataset(
+            labels_path, images_dir, direct_map,
+            max_images=max_images, prioritize_classes=prioritize_classes, seed=seed,
+        )
     elif fmt == "idd":
         records = _parse_idd_polygons_dataset(labels_path, images_dir, direct_map)
     elif fmt == "bdd100k":
         records = _parse_bdd100k_dataset(labels_path, images_dir, direct_map, weather_filter, time_filter)
     else:
         raise ValueError(f"Unsupported format {fmt!r} (supported: coco, idd, bdd100k)")
+
+    if max_images is not None and len(records) > max_images:
+        prio_set = set(prioritize_classes)
+        prio_recs, other_recs = [], []
+        for rec in records:
+            cls_in_rec = {it.cls for it in rec["instances"]}
+            has_rider_pair = 8 in cls_in_rec and bool(cls_in_rec & {4, 6})
+            if (cls_in_rec & prio_set) or has_rider_pair:
+                prio_recs.append(rec)
+            else:
+                other_recs.append(rec)
+        rng = random.Random(seed)
+        rng.shuffle(prio_recs)
+        rng.shuffle(other_recs)
+        records = prio_recs + other_recs
 
     seen_shas, seen_dhashes = collect_exclusion_hashes(exclude_dir)
     out_img_dir = out_dir / "images" / split

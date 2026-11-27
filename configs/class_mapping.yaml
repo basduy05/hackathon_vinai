@@ -21,17 +21,21 @@ geometric_merge_rules:
   motorcycle_to_motorcyclist:
     vehicle_class: 4
     merged_class: 5
-    auto_merge_min_iou: 0.08
-    auto_merge_min_person_overlap: 0.25
-    ambiguity_min_person_overlap: 0.05
+    auto_merge_min_iou: 0.04
+    auto_merge_min_person_overlap: 0.12
+    auto_merge_min_bbox_iou: 0.08
+    auto_merge_max_dx_ratio: 0.60
+    ambiguity_min_person_overlap: 0.03
     max_center_dx_ratio: 0.75
     require_rider_above_or_inside: true
   bicycle_to_cyclist:
     vehicle_class: 6
     merged_class: 7
-    auto_merge_min_iou: 0.08
-    auto_merge_min_person_overlap: 0.25
-    ambiguity_min_person_overlap: 0.05
+    auto_merge_min_iou: 0.04
+    auto_merge_min_person_overlap: 0.12
+    auto_merge_min_bbox_iou: 0.08
+    auto_merge_max_dx_ratio: 0.60
+    ambiguity_min_person_overlap: 0.03
     max_center_dx_ratio: 0.75
     require_rider_above_or_inside: true
 
@@ -89,14 +93,71 @@ sources:
       "trailer": 3
       "other vehicle": 3
       "motorcycle": 4
+      "motor": 4
       "bicycle": 6
+      "bike": 6
       "pedestrian": 8
       "person": 8
       "rider": 8  # Merged into 5 or 7 when overlapping motorcycle/bicycle
       "traffic sign": 9
       "traffic light": 10
     needs_rider_merge: true
-    rider_labels: ["rider"]
+    rider_labels: ["rider", "person"]
+
+  kaggle_generic_aliases:
+    direct_map:
+      "car": 0
+      "sedan": 0
+      "suv": 0
+      "van": 0
+      "minivan": 0
+      "pickup": 0
+      "taxi": 0
+      "bus": 1
+      "coach": 1
+      "truck": 2
+      "lorry": 2
+      "heavy truck": 2
+      "threewheel": 3
+      "three-wheeler": 3
+      "three wheeler": 3
+      "auto-rickshaw": 3
+      "autorickshaw": 3
+      "rickshaw": 3
+      "tuk-tuk": 3
+      "tuktuk": 3
+      "tricycle": 3
+      "cyclo": 3
+      "caravan": 3
+      "trailer": 3
+      "vehicle fallback": 3
+      "other vehicle": 3
+      "other_vehicle": 3
+      "construction vehicle": 3
+      "motorcycle": 4
+      "motorbike": 4
+      "motor": 4
+      "scooter": 4
+      "moped": 4
+      "motorcyclist": 5
+      "motorcycle_rider": 5
+      "bicycle": 6
+      "bike": 6
+      "cyclist": 7
+      "bicyclist": 7
+      "person": 8
+      "pedestrian": 8
+      "rider": 8
+      "sign": 9
+      "traffic sign": 9
+      "traffic_sign": 9
+      "stop sign": 9
+      "road sign": 9
+      "traffic light": 10
+      "traffic_light": 10
+    sign_code_prefixes: ["dp.", "p.", "r.", "s.", "w."]
+    needs_rider_merge: true
+    rider_labels: ["person", "pedestrian", "rider"]
 
   coco:
     direct_map:

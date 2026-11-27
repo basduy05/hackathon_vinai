@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -152,8 +153,10 @@ def convert_bbox_dataset(
     image_paths = sorted(p for p in images_dir.rglob("*") if p.is_file() and p.suffix.lower() in IMG_EXTS)
     review_queue: list[dict[str, Any]] = []
     n_images = n_instances = n_fallback = n_bleed_clipped = 0
+    total_images = len(image_paths)
+    t_start = time.monotonic()
 
-    for img_path in image_paths:
+    for img_idx, img_path in enumerate(image_paths, start=1):
         rel = img_path.relative_to(images_dir)
         lbl_path = labels_dir / rel.with_suffix(".txt")
         if not lbl_path.is_file():
@@ -163,22 +166,32 @@ def convert_bbox_dataset(
         h, w = img_bgr.shape[:2]
         scale_640 = (imgsz / max(w, h)) ** 2
         boxes_info = parse_yolo_bbox_file(lbl_path, w, h, class_map=class_map, default_class=default_class)
+        # Prefilter sub-threshold boxes BEFORE calling SAM 2 to avoid wasted mask decoder passes on tiny objects.
+        eligible_boxes = [
+            (cls_id, box)
+            for cls_id, box in boxes_info
+            if max(1.0, (box[2] - box[0]) * (box[3] - box[1])) * scale_640 >= min_area_640
+        ]
 
-        if not boxes_info:
+        if not eligible_boxes:
             transfer_image(img_path, out_img_dir / img_path.name, mode=transfer_mode)
             write_yolo_seg_label(out_lbl_dir / f"{img_path.stem}.txt", [])
             n_images += 1
+            if total_images >= 20 and (img_idx % 50 == 0 or img_idx == total_images):
+                print(
+                    f"  [SAM2:{source_name}/{split}] {img_idx}/{total_images} ảnh "
+                    f"({time.monotonic() - t_start:.1f}s) | inst={n_instances}",
+                    flush=True,
+                )
             continue
 
-        bboxes = [b for _, b in boxes_info]
+        bboxes = [b for _, b in eligible_boxes]
         raw_masks = predictor(img_bgr, bboxes)
         seg_instances: list[tuple[int, np.ndarray]] = []
 
-        for idx, ((cls_id, box), raw_mask) in enumerate(zip(boxes_info, raw_masks)):
+        for idx, ((cls_id, box), raw_mask) in enumerate(zip(eligible_boxes, raw_masks)):
             x1, y1, x2, y2 = box
             box_area = max(1.0, (x2 - x1) * (y2 - y1))
-            if box_area * scale_640 < min_area_640:
-                continue
 
             mask_bin = (np.asarray(raw_mask) > 0).astype(np.uint8)
             raw_area = float(mask_bin.sum())
@@ -227,6 +240,12 @@ def convert_bbox_dataset(
         transfer_image(img_path, out_img_dir / img_path.name, mode=transfer_mode)
         write_yolo_seg_label(out_lbl_dir / f"{img_path.stem}.txt", seg_instances)
         n_images += 1
+        if total_images >= 20 and (img_idx % 50 == 0 or img_idx == total_images):
+            print(
+                f"  [SAM2:{source_name}/{split}] {img_idx}/{total_images} ảnh "
+                f"({time.monotonic() - t_start:.1f}s) | inst={n_instances}",
+                flush=True,
+            )
 
     write_data_yaml(out_dir, classes, has_val=(out_dir / "images" / "val").is_dir())
     queue_path = out_dir / f"sam2_review_queue_{split}.json"

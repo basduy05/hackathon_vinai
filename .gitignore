@@ -3,6 +3,8 @@ data/raw/*
 !data/raw/.gitkeep
 data/staged/*
 !data/staged/.gitkeep
+!data/staged/ambiguity_queue/
+data/staged/ambiguity_queue/*
 !data/staged/ambiguity_queue/.gitkeep
 data/golden_val/*
 !data/golden_val/.gitkeep

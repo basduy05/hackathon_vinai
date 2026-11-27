@@ -1,8 +1,10 @@
 project: AIInAction RoboTaxi Data Centric Competition
+team_name: "Đội 34 – Nguyễn Bá Duy"
+team_id: 39
 model_fixed: yolo26n-seg
 imgsz: 640
 metric: "100 * mask_map_50_95"
-current_phase: 1
+current_phase: 2
 submission_budget:
   total: 20
   used: 0
@@ -10,17 +12,32 @@ submission_budget:
 
 phases:
   phase_1_foundation:
-    status: in_progress
+    status: done
     deliverables:
+      - .gitignore
       - configs/competition.yaml
       - configs/class_mapping.yaml
+      - research-state.yaml
+      - research-log.md
+      - findings.md
+      - datasets_registry.md
       - src/selfcheck_bridge.py
       - src/validate_dataset.py
       - src/export_verify_onnx.py
+      - tests/test_phase1.py
   phase_2_data_pipelines:
-    status: pending
+    status: done
+    deliverables:
+      - src/seg_utils.py
+      - src/map_and_merge_public.py
+      - src/box_to_mask_sam2.py
+      - src/prepare_vn_frames.py
+      - src/augment_and_crop.py
+      - src/eval_golden.py
+      - src/build_master.py
+      - tests/test_phase2.py
   phase_3_golden_val_baseline:
-    status: pending
+    status: in_progress
   phase_4_datacentric_loops:
     status: pending
   phase_5_finalize_and_slides:

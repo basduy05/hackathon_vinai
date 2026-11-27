@@ -1,10 +1,11 @@
 # Competition contract synchronized with train_and_export.ipynb (v3.0.0+7880385f)
 competition:
   name: AIInAction RoboTaxi Data Centric Competition
+  team_name: "Đội 34 – Nguyễn Bá Duy"
   notebook_path: train_and_export.ipynb
   notebook_version: "3.0.0+7880385f"
   detscore_version: "0.2.0"
-  team_id: 0  # TODO: Cap nhat TEAM_ID (seed) chinh thuc cua doi
+  team_id: 39
   model_allowed:
     - yolo26n-seg
   imgsz: 640

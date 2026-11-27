@@ -8,3 +8,10 @@
 - **Sample data audit (`sample_data/`)**:
   - 10 synthetic illustrations (`960×540`), 105 instances across all 11 classes. Not for submission training.
 - **Action**: Building Phase 1 foundation (`configs/`, `src/selfcheck_bridge.py`, `src/validate_dataset.py`, `src/export_verify_onnx.py`).
+
+## 2026-11-27 10:36 — Phase 2 Pipeline Kickoff (Đội 34 – Nguyễn Bá Duy, `TEAM_ID = 39`)
+- Synchronized `team_id: 39` into `configs/competition.yaml` and `research-state.yaml`.
+- Upgraded `annotation_guideline_and_qc.md` to v2 (synced with `100 × mask mAP@[.5:.95]`, `MIN_GT_AREA_PX = 64 px² @ 640`, `max_det = 100`, VN edge-case decision tree, and 3-tier QC).
+- Implementing Phase 2 modular data engineering & evaluation pipeline (`seg_utils.py`, `map_and_merge_public.py`, `box_to_mask_sam2.py`, `prepare_vn_frames.py`, `augment_and_crop.py`, `eval_golden.py`).
+- **Phase 2 Pipeline Verification**: Implemented `seg_utils.py`, `map_and_merge_public.py`, `box_to_mask_sam2.py`, `prepare_vn_frames.py`, `augment_and_crop.py`, `eval_golden.py`, `build_master.py`, and `tests/test_phase2.py`. All 8 unit tests (`test_phase1` + `test_phase2`) and `sample_data` Tier-1 QC passed.
+- **Environment check note**: Local Python 3.14.4 has `ultralytics==8.4.215`, `onnxruntime==1.29.0`, and lacks `pycocotools`; use `train_and_export.ipynb` pinned environment on Colab/Kaggle for final ONNX export (`8.4.214`) and official `detscore` evaluation.

@@ -1,49 +1,66 @@
-# Annotation Guideline & QC Playbook — AIInAction RoboTaxi (11 Classes)
+# Annotation Guideline & QC Playbook v2 — Đội 34 (Nguyễn Bá Duy | `TEAM_ID = 39`)
 
-Tài liệu này dùng làm chuẩn thống nhất cho toàn đội khi gán nhãn, chuyển đổi dữ liệu công khai (public datasets) và kiểm soát chất lượng (QC) trước khi đưa vào huấn luyện `yolo26n-seg` (`imgsz = 640`).
-
----
-
-## Phần 1: Annotation Guideline (Hướng Dẫn Gán Nhãn Chuẩn)
-
-### 1.1. Nguyên tắc chung (YOLO-seg Polygon)
-1. **Ôm sát đường viền (Tight Polygon)**: Vẽ đa giác bám sát biên thật của đối tượng, không vẽ thừa nền trời/đường quá rộng, nhưng cũng không cắt lẹm vào thân đối tượng.
-2. **Định dạng & Độ mịn**: Mỗi đối tượng là **1 dòng** trong file `.txt`: `<class_id> <x1> <y1> <x2> <y2> ...` (tọa độ chuẩn hóa `[0, 1]`, tối thiểu 3 đỉnh). Không dùng hình chữ nhật 4 điểm thay cho polygon đối tượng cong/nghiêng.
-3. **Mỗi instance một mask riêng**: Trong dòng xe máy dày đặc, tuyệt đối **không** gộp nhiều xe máy cạnh nhau thành một mask lớn.
-4. **Ảnh không có đối tượng**: Phải giữ tệp `.txt` **rỗng (0 byte)** tương ứng trong `labels/`.
-5. **Không gán nhãn nhiễu**: Không gán nhãn cho hình phản chiếu trên kính/gương/vũng nước, hoặc các vật thể quá mờ/quá xa không thể nhận diện bằng mắt thường (`< 8×8 px` ở ảnh gốc).
+> **Đồng bộ với hợp đồng chấm điểm thực tế (`train_and_export.ipynb` v3.0.0+7880385f & `detscore` v0.2.0):**
+> - **Thước đo duy nhất:** $\text{Điểm} = 100 \times \text{mask mAP}@[.5:.95]$ (trung bình 10 ngưỡng IoU từ `0.50` đến `0.95`).
+> - **Ngưỡng diện tích chấm điểm:** `MIN_GT_AREA_PX = 64.0` tại thang `640` (`area_px * (640 / max(H, W))^2`).
+> - **Giới hạn suy luận:** `imgsz = 640`, `conf = 0.001`, `iou = 0.7`, `max_det = 100`, `mask_threshold = 0.5`, `multi_label = True`.
 
 ---
 
-### 1.2. Quy tắc chi tiết từng lớp & Edge Cases bắt buộc
+## Phần 1: Annotation Guideline (Chuẩn Gán Nhãn 11 Lớp & Edge Cases VN)
 
-| ID | Lớp | Quy tắc bao phủ (Include) | Cấm / Loại trừ (Exclude) & Edge Case |
+### 1.1. Nguyên tắc hình học bắt buộc để tối đa hóa `mask mAP@[.5:.95]`
+Vì điểm chấm trung bình cả ở các ngưỡng khắt khe **IoU `0.75 – 0.95`**, chỉ cần mask lệch biên 3–5 pixel hoặc đa giác thô sẽ tụt điểm rất nặng:
+
+1. **Ôm sát đường viền (Tight Polygon, không dùng đa giác thô)**:
+   - Bám sát biên thật của đối tượng, tối thiểu **8–24+ đỉnh** cho các đối tượng cong/phức tạp (người, xe máy, ô tô). Chỉ dùng 4 đỉnh với biển báo/hộp đèn hình chữ nhật vuông góc.
+   - Khi xuất từ SAM 2 / OpenCV `findContours`: dùng hệ số làm mượt thấp (`epsilon <= 0.0015 × chu vi`) để giữ nét cong, không gọt mất tay lái, gương, mũ bảo hiểm hay bánh xe.
+2. **Mỗi instance một mask riêng (Không gộp đám đông)**:
+   - Ở ngã tư Việt Nam có hàng chục xe máy ken sát nhau: mỗi cụm `(xe máy + người ngồi trên xe đó)` phải là **1 dòng độc lập**.
+   - Lưu ý giới hạn **`max_det = 100` / ảnh**: ưu tiên gán chuẩn xác, đầy đủ mọi đối tượng rõ nét từ gần tới trung bình; không tạo hàng chục nhãn rác li ti làm loãng độ tự tin của mô hình.
+3. **Quy tắc kích thước tối thiểu theo `MIN_GT_AREA_PX = 64 px² @ 640`**:
+   - Hệ thống chấm quy đổi diện tích theo công thức:
+     $$\text{area}_{640} = \text{area}_{\text{orig}} \times \left(\frac{640}{\max(W, H)}\right)^2$$
+   - Bất kỳ nhãn hay dự đoán lẻ nào có $\text{area}_{640} < 64\text{ px}^2$ đều bị **BỎ QUA (ignore)** khi chấm. Bảng quy đổi ngưỡng tối thiểu cần gán trên ảnh gốc:
+     - Ảnh `640×640` / `640×480`: tối thiểu $\ge 64\text{ px}^2$ (~`8×8 px`).
+     - Ảnh `1280×720` (720p): tối thiểu $\ge 256\text{ px}^2$ (~`16×16 px`).
+     - Ảnh `1920×1080` (1080p): tối thiểu $\ge 576\text{ px}^2$ (~`24×24 px`).
+   - **Quy tắc thực hành:** Không gán các chấm mờ quá xa dưới ngưỡng `45–50 px² @ 640` (chỉ làm nhiễu mô hình Nano); nhưng các biển báo/đèn giao thông trong vùng `64–200 px² @ 640` **bắt buộc phải gán cực chuẩn** vì chúng dễ mất điểm nhất.
+4. **Ảnh không có đối tượng (Background / Hard Negative)**:
+   - Giữ tệp `.txt` **rỗng (0 byte)** tương ứng trong `labels/`. Không xóa file `.txt`.
+5. **Không gán nhãn vào hình phản chiếu**:
+   - Bỏ qua xe/người phản chiếu trong kính cửa hàng, gương chiếu hậu xe mình, hoặc bóng nước mưa dưới đường.
+
+---
+
+### 1.2. Bảng quy tắc chi tiết 11 lớp & Edge Cases đặc thù Việt Nam
+
+| ID | Lớp | Bao phủ chuẩn (Include) | Loại trừ & Edge Case hay sai nhất (Exclude / Edge Case) |
 | :-: | :--- | :--- | :--- |
-| `0` | **Car** | Sedan, SUV, hatchback, minivan, xe 7 chỗ, bán tải, taxi, xe điện du lịch, xe cứu thương dạng van, **xe 9–15 chỗ** (limousine, Ford Transit bản <16 chỗ). | **KHÔNG** gán xe từ 16 chỗ trở lên. |
-| `1` | **Bus** | Xe buýt đô thị, xe khách, xe du lịch **từ 16 chỗ trở lên** (Transit 16c, Solati, County, Universe...). | **KHÔNG** gán xe 9–15 chỗ (`0`) hoặc xe tải thùng kín (`2`). |
-| `2` | **Truck** | Xe tải các cỡ (tải nhẹ, tải nặng), xe ben, xe bồn, xe cứu hỏa, **phần cabin + thân xe đầu kéo**. | **QUAN TRỌNG:** Với xe đầu kéo kéo theo rơ-moóc/container, **CHỈ khoanh cabin & thân đầu kéo**. Tuyệt đối **KHÔNG** khoanh chung phần rơ-moóc phía sau. |
-| `3` | **Other vehicle** | Ba gác máy, xích lô, xe lam, xe công trình (máy xúc, xe lu, xe cẩu, xe nâng), xe máy cày, **rơ-moóc và sơ-mi rơ-moóc**, mọi phương tiện khác không thuộc `0,1,2,4,5,6,7`. | Phần đầu kéo vẫn là `2`; chỉ rơ-moóc/thùng container kéo theo mới là `3`. |
-| `4` | **Motorcycle** | Xe máy, xe tay ga, xe mô tô, xe điện 2 bánh kiểu xe máy **KHÔNG có người ngồi** (đang dựng/đỗ hoặc **đang được người dắt bộ**). | Nếu có ít nhất 1 người đang ngồi trên yên → chuyển sang `5`. |
-| `5` | **Motorcyclist** | Xe máy **CÓ ít nhất 1 người ngồi**: vẽ **1 polygon DUY NHẤT** phủ trùm **CẢ xe + TẤT CẢ người ngồi trên xe** (người lái, người ngồi sau, trẻ em) + **hàng hóa cồng kềnh** đang chở trên xe/người. | **KHÔNG** tách riêng người ngồi trên xe thành `8 = Pedestrian`. Nếu người chỉ đứng sát cạnh xe đang đỗ (chân không kẹp xe, không ngồi trên yên) → tách `4` + `8`. |
-| `6` | **Bicycle** | Xe đạp, xe đạp điện kiểu xe đạp **KHÔNG có người ngồi** (đang đỗ hoặc **đang dắt bộ**). | Nếu có người ngồi đạp → chuyển sang `7`. |
-| `7` | **Cyclist** | Xe đạp **CÓ người đi**: vẽ **1 polygon DUY NHẤT** phủ trùm **CẢ xe đạp + người đi**. | **KHÔNG** tách riêng người đạp thành `8 = Pedestrian`. |
-| `8` | **Pedestrian** | Mọi người **KHÔNG ngồi trên phương tiện**: người đi bộ, đứng, ngồi vỉa hè, trẻ em, **người đang dắt xe máy/xe đạp**. | Người ngồi trên xe máy/xe đạp (`5`/`7`) hoặc người ngồi hẳn trong xe ba gác/xích lô (nếu khuất trong phương tiện) không tách làm Pedestrian. |
-| `9` | **Sign** | Biển báo hiệu đường bộ, biển chỉ dẫn, biển công trường. **CHỈ phủ phần mặt biển**. | **TUYỆT ĐỐI KHÔNG phủ cột / trụ / giá treo**. Nếu trên một cột có 2 biển tách rời rõ ràng → vẽ 2 polygon riêng. |
-| `10` | **Traffic light** | **CẢ hộp đèn tín hiệu giao thông** (đèn xe cộ và đèn người đi bộ). | **KHÔNG** chỉ khoanh mỗi bóng đèn đang sáng. **KHÔNG** phủ cột hay cần vươn gắn đèn. |
+| `0` | **Car** | Sedan, SUV, hatchback, MPV/7 chỗ, bán tải, taxi, xe điện du lịch, xe cứu thương dạng van, **xe 9–15 chỗ** (limousine 9–11c, van chở khách nhỏ). | **KHÔNG** gán xe **≥ 16 chỗ** (`1 = Bus`). Xe bán tải chở đồ thấp ngang thùng vẫn gán `0 = Car`. |
+| `1` | **Bus** | Xe buýt nội đô, xe khách, xe giường nằm, xe **từ 16 chỗ trở lên** (Ford Transit 16c, Hyundai Solati 16c, County 29c, Universe 45c). | **KHÔNG** gán xe 9–15 chỗ (`0`) hoặc xe tải thùng kín (`2`). Kiểm tra kỹ cửa sổ dọc thân và kính chắn gió lớn đặc trưng của xe ≥ 16 chỗ. |
+| `2` | **Truck** | Xe tải các cỡ (tải nhẹ 500kg – tải nặng), xe ben, xe bồn, xe rác, xe cứu hỏa, **chỉ phần cabin & thân đầu kéo**. | **EDGE CASE ĐẦU KÉO:** Nếu xe đầu kéo kéo theo rơ-moóc/container, **CHỈ khoanh phần đầu kéo (cabin + khung bánh đầu kéo)** là `2`. Tuyệt đối không kéo dài polygon sang thùng container phía sau. |
+| `3` | **Other vehicle** | **Ba gác máy, xích lô, xe lam, xe công trình** (máy xúc, xe lu, xe cẩu, xe nâng), xe máy cày, xe tự chế, **rơ-moóc và sơ-mi rơ-moóc**, mọi phương tiện không thuộc lớp khác. | - Thùng container/rơ-moóc đang gắn sau đầu kéo hoặc đỗ rời → `3`.<br>- Xe ba gác chở hàng cồng kềnh + người lái trên xe → **1 mask `3`** phủ cả xe ba gác, hàng và người lái. |
+| `4` | **Motorcycle** | Xe máy, xe tay ga, mô tô, xe máy điện 2 bánh **KHÔNG có người ngồi trên yên** (đang đỗ, dựng vỉa hè, hoặc **đang được người dắt bộ**). | Hàng xe máy dựng san sát trên vỉa hè: gán riêng từng chiếc rõ nét. Nếu có ≥ 1 người ngồi lên yên → chuyển `5`. |
+| `5` | **Motorcyclist** | Xe máy **CÓ ít nhất 1 người ngồi**: vẽ **1 polygon DUY NHẤT** phủ **CẢ xe + TẤT CẢ người ngồi trên xe** (người lái, người ngồi sau, trẻ em) + **hàng hóa cồng kềnh / lồng sắt / thùng hàng** chở trên xe. | - **TUYỆT ĐỐI KHÔNG** tách riêng người ngồi sau hay trẻ em thành `8 = Pedestrian`.<br>- Chống 1 chân dừng đèn đỏ nhưng mông vẫn ngồi trên yên → vẫn là `5`.<br>- Người mặc áo mưa trùm kín đầu xe → gán cả khối áo mưa + xe thành 1 mask `5`. |
+| `6` | **Bicycle** | Xe đạp, xe đạp điện kiểu xe đạp **KHÔNG có người ngồi** (đang đỗ hoặc **đang dắt bộ**). | Đang dắt xe đạp → xe là `6`, người dắt là `8`. |
+| `7` | **Cyclist** | Xe đạp, xe đạp điện kiểu xe đạp **CÓ người đi**: vẽ **1 polygon DUY NHẤT** phủ **CẢ xe đạp + người ngồi trên xe**. | Không tách người đạp thành `8 = Pedestrian`. |
+| `8` | **Pedestrian** | Mọi người **KHÔNG ngồi trên phương tiện**: người đi bộ, chạy bộ, đứng chờ, ngồi ghế/vỉa hè, trẻ em, **người đang dắt xe máy/xe đạp**, người bán hàng rong đẩy xe đẩy tay. | - Người đang ngồi trên xe máy/xe đạp → thuộc `5` hoặc `7`.<br>- Xe đẩy tay không phải phương tiện cơ giới/xe đạp: chỉ gán người là `8`. |
+| `9` | **Sign** | Biển báo hiệu đường bộ, biển chỉ dẫn, biển tên đường/làn xe, biển công trường. **CHỈ phủ mặt biển**. | - **KHÔNG phủ cột / trụ / khung sắt / giá long môn.**<br>- Biển chính + biển phụ tách rời khe hở → vẽ 2 polygon `9` riêng.<br>- **KHÔNG gán biển quảng cáo cửa hàng** (làm hard negative). |
+| `10` | **Traffic light** | **CẢ hộp đèn tín hiệu giao thông** (cả hộp đèn xe cộ 3 bóng, hộp đèn mũi tên, hộp đèn người đi bộ). | - **KHÔNG** chỉ khoanh mỗi bóng đèn đang sáng.<br>- **KHÔNG** phủ cột hay cần vươn.<br>- Hộp đèn chính và hộp đếm giây/đèn rẽ **tách vỏ hộp rõ ràng** → tách thành từng instance `10` riêng; liền khối → 1 instance `10`. |
 
 ---
 
-### 1.3. Cây quyết định nhanh (Decision Tree) cho các ca mập mờ
-
+### 1.3. Cây quyết định nhanh (Decision Tree) & Xử lý Che khuất
 ```text
 [Thấy người gần xe 2 bánh]
-  ├── Người đang ngồi trên yên (hoặc 1 chân chống đất nhưng vẫn ngồi trên yên)?
+  ├── Người đang ngồi trên yên (hoặc chống 1 chân dừng đèn đỏ vẫn ngồi yên)?
   │     └── CÓ ──▶ Gộp 1 mask duy nhất: 5 (Motorcyclist) hoặc 7 (Cyclist)
-  └── Người đứng dưới đất (đang dắt xe, đang khóa xe, hoặc đứng cạnh xe đỗ)?
+  └── Người đứng dưới đất (dắt xe, khóa xe, đứng cạnh xe đỗ)?
         └── CÓ ──▶ Tách 2 mask: Người = 8 (Pedestrian) | Xe = 4 (Motorcycle) hoặc 6 (Bicycle)
 
 [Thấy xe tải lớn / container]
-  ├── Xe tải liền khối (thùng gắn liền khung)? ──▶ 1 mask: 2 (Truck)
+  ├── Xe tải liền khối? ──▶ 1 mask: 2 (Truck)
   └── Xe đầu kéo có khớp nối kéo theo rơ-moóc?
         ├── Phần cabin + thân đầu kéo ──▶ 2 (Truck)
         └── Phần rơ-moóc / container ──▶ 3 (Other vehicle)
@@ -52,52 +69,40 @@ Tài liệu này dùng làm chuẩn thống nhất cho toàn đội khi gán nh�
   ├── ≥ 16 chỗ (Transit 16c, Solati, xe buýt, xe khách lớn) ──▶ 1 (Bus)
   └── < 16 chỗ (Limousine 9-11c, van, 7 chỗ, bán tải) ──▶ 0 (Car)
 ```
+- **Che khuất cắt đôi vật thể**: Nếu cột điện mảnh cắt ngang thân ô tô/xe tải, nối qua khe hở mảnh để giữ nguyên **1 instance** (tránh tạo 2 mảnh rời làm giảm IoU).
+- **Che khuất người lái xe máy sau ô tô**: Thấy rõ cả mũ bảo hiểm/thân người + tay lái/yên xe → `5 = Motorcyclist`; nếu chỉ thấy lấp ló không xác định được phương tiện → bỏ qua.
 
 ---
 
-## Phần 2: Quy Trình QC (Quality Control) 3 Tầng
-
-Mọi batch dữ liệu (từ Public Dataset, SAM 2 Box-to-Mask, Pseudo-label hay tự gán tay) **bắt buộc** phải đi qua 3 tầng QC trước khi gộp vào Master Dataset để train.
+## Phần 2: Quy Trình QC (Quality Control) 3 Tầng + Tích Hợp `detscore_selfcheck`
 
 ```mermaid
 flowchart LR
-    Raw["Batch dữ liệu mới"] --> L1["Tầng 1: Automated QC Script\n(100% mẫu — 0 lỗi format)"]
-    L1 -->|Pass format| L2["Tầng 2: Model-Assisted QC\n(Tìm nhãn thiếu & sai lớp)"]
-    L1 -->|Bị gắn cờ hình học| Queue["Ambiguity Queue\n(Duyệt & sửa tay)"]
-    L2 -->|High-conf mismatch| Queue
-    Queue --> L3["Tầng 3: Human Spot-Check\n(10-15% ngẫu nhiên)"]
-    L2 -->|Clean| L3
-    L3 -->|Lỗi < 3%| Master["Master Dataset (Sẵn sàng Train)"]
-    L3 -->|Lỗi >= 3%| Rework["Trả lại sửa toàn batch"]
+    B["Batch mới (Public / SAM2 / VN Auto-label)"] --> T1["Tầng 1: Automated QC\n(src/validate_dataset.py)"]
+    T1 -->|Lỗi format = 0| QCheck{"Có cờ hình học?\n(ambiguity_queue.json)"}
+    T1 -->|Lỗi format > 0| FixFmt["Sửa script convert / clip tọa độ"]
+    FixFmt --> T1
+    QCheck -->|Có| Queue["Ambiguity Queue\n(Duyệt & sửa tay 100%)"]
+    QCheck -->|Không| T2["Tầng 2: Model-Assisted QC\n(src/eval_golden.py + detscore)"]
+    Queue --> T3["Tầng 3: Human Cross-Audit\n(10-15% ngẫu nhiên + Registry)"]
+    T2 -->|Flag thiếu nhãn / sai lớp| Queue
+    T3 -->|Lỗi < 3% & 0% lỗi edge-case| Master["Gộp vào data/master/"]
+    T3 -->|Lỗi >= 3%| Rework["Loại bỏ / Sửa lại batch"]
 ```
 
-### Tầng 1: Automated QC Gate (Tự động 100% bằng `validate_dataset.py`)
-Kiểm tra toàn bộ lỗi kỹ thuật và **cảnh báo hình học đặc thù edge case**:
-1. **Format & Integrity Checks (Bắt buộc 0 lỗi)**:
-   - Mỗi ảnh trong `images/` phải có đúng 1 `.txt` tương ứng trong `labels/` (không thừa, không thiếu).
-   - `class_id` là số nguyên thuộc `[0, 10]`.
-   - Mọi tọa độ `x, y ∈ [0.0, 1.0]`, số lượng tọa độ chẵn và `≥ 6` (tối thiểu 3 đỉnh).
-   - Không có `NaN`, `Inf`, polygon tự cắt hoặc diện tích suy biến (`area <= 1e-5`).
-2. **Heuristic Edge-Case Flags (Đẩy vào Ambiguity Queue để duyệt)**:
-   - **Rider-Leak Flag (Lỗi `4+8` thay vì `5`, `6+8` thay vì `7`)**: Phát hiện cặp `(Pedestrian, Motorcycle/Bicycle)` có `IoU > 0.10` hoặc tâm `Pedestrian` nằm phía trên/trong vùng mở rộng của bbox xe → nghi ngờ **quên gộp mask**.
-   - **Duplicate Flag**: Hai polygon cùng lớp có `IoU > 0.85` → nghi ngờ trùng lặp nhãn.
-   - **Sign-Pole Flag (Lỗi `9 = Sign` dính cột)**: Polygon lớp `9` có tỷ lệ `height / width > 3.5` và diện tích lớn bất thường → nghi ngờ khoanh cả cột biển báo.
-   - **Light-Bulb Flag (Lỗi `10 = Traffic light` chỉ khoanh bóng)**: Polygon lớp `10` có hình tròn/vuông quá nhỏ (`aspect_ratio ≈ 1.0`) nằm ngay sát một hộp đèn khác hoặc không bao trọn khung chữ nhật của hộp đèn.
-   - **Trailer-Merge Flag (Lỗi `2 = Truck` gộp cả rơ-moóc)**: Polygon lớp `2` có chiều dài ngang quá lớn (`width > 0.5 * img_width` và `width / height > 2.5`) → kiểm tra xem có phải đầu kéo + rơ-moóc chưa tách sang `3`.
+### Tầng 1: Automated QC Gate (`python -m src.validate_dataset --data-dir <dir>`)
+- **Zero-tolerance (`fatal_count == 0`)**: Khớp cặp 1-1 ảnh–`.txt` (kể cả `.txt` rỗng), `class_id ∈ [0, 10]`, polygon lẻ `>= 7` cột, tọa độ trong `[0, 1]`, không tự cắt, không rò rỉ `dhash64` (`dup_hamming_max = 2`) với `data/golden_val/`.
+- **5 Cờ phát hiện Edge Case (`ambiguity_queue.json`)**: `RIDER_LEAK`, `DUPLICATE_MASK`, `SIGN_POLE_SUSPECT`, `LIGHT_BULB_ONLY`, `TRAILER_MERGED`.
 
-### Tầng 2: Model-Assisted QC (Confident Learning / Disagreement Mining)
-Sau khi có model từ Iteration 1 trở đi, chạy inference chính model đó lên tập Train (hoặc batch mới) với ngưỡng `conf = 0.25`:
-1. **Missing Label Detection**: Model dự đoán `conf ≥ 0.75` nhưng không khớp với bất kỳ Ground Truth nào (`IoU < 0.2`) → **khả năng cao người gán bị sót đối tượng** (rất hay gặp ở dòng xe máy đông đúc hoặc biển báo nhỏ).
-2. **Wrong Class Detection**: Model dự đoán `conf ≥ 0.75` tại vị trí khớp GT (`IoU ≥ 0.6`) nhưng **khác `class_id`** (đặc biệt các cặp `0 vs 1`, `2 vs 3`, `4 vs 5`, `6 vs 7`) → ưu tiên kiểm tra sửa lại nhãn.
-3. **Bad Mask Boundary**: Cùng `class_id`, bbox khớp tốt (`bbox_IoU ≥ 0.75`) nhưng `mask_IoU < 0.5` → kiểm tra lại chất lượng viền polygon.
+### Tầng 2: Model-Assisted QC & `detscore_selfcheck` (`python -m src.eval_golden`)
+- **Confident Learning quét tập Train**:
+  - *Missing Label*: Prediction `conf ≥ 0.70`, `IoU_gt < 0.20`.
+  - *Wrong Class*: Prediction `conf ≥ 0.70`, `IoU_gt ≥ 0.55` nhưng khác `class_id` (`0<->1`, `2<->3`, `4<->5`, `6<->7`).
+  - *Bad Mask Boundary*: Cùng `class_id`, `bbox_IoU ≥ 0.70` nhưng `mask_IoU < 0.55`.
+- **Chấm Golden Val bằng `detscore_selfcheck`**: Lấy chính xác `100 × mask mAP@[.5:.95]`, per-class AP, confusion matrix và danh sách ảnh lỗi nặng nhất.
 
-### Tầng 3: Human Audit & Tiêu chuẩn nghiệm thu Batch (Sign-off Checklist)
-- **Phân công**: Người gán nhãn và người QC **không trùng nhau** (cross-review) cho các batch ảnh Việt Nam tự gán/sửa.
-- **Tỷ lệ kiểm tra**:
-  - **100%** các ảnh bị gắn cờ trong *Ambiguity Queue* (từ Tầng 1 & Tầng 2).
-  - **10–15%** mẫu ngẫu nhiên trên phần còn lại của batch (tối thiểu 30 ảnh/batch).
-- **Điều kiện Pass (Đạt chuẩn gộp vào Master Dataset)**:
-  - [ ] Tầng 1 Automated QC: **0 lỗi định dạng**.
-  - [ ] Tỷ lệ lỗi trên mẫu random spot-check: **< 3% số instance**.
-  - [ ] **0% lỗi quy ước nghiêm trọng** ở 4 nhóm edge case: *(1) gộp `5`/`7`, (2) tách đầu kéo `2` và rơ-moóc `3`, (3) mặt biển `9` không cột, (4) cả hộp đèn `10`*.
-  - [ ] Đã cập nhật đầy đủ nguồn, URL, license, số ảnh và bảng mapping vào `datasets_registry.md`.
+### Tầng 3: Human Audit & Checklist Nghiệm Thu Batch
+- [ ] **100%** `ambiguity_queue.json` (Tầng 1 + Tầng 2) đã được kiểm tra/sửa tay.
+- [ ] **Spot-check ngẫu nhiên 10–15% ảnh** (tối thiểu 30 ảnh/batch): tỷ lệ lỗi **< 3% instances**, **0% lỗi quy ước nghiêm trọng** ở 5 edge cases cốt lõi.
+- [ ] **0 ảnh trùng/rò rỉ** với `data/golden_val/` (`leak_exact == 0`, `leak_near == 0`).
+- [ ] Đã ghi đầy đủ nguồn, URL, license, số ảnh, mapping vào `datasets_registry.md`.

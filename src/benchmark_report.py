@@ -390,6 +390,24 @@ def render_markdown_report(summary: dict[str, Any], baseline: dict[str, Any] | N
         f"| **Mask IoU của TP (`mean / median`)** | `{tp_miou.get('mean', 0):.4f} / {tp_miou.get('median', 0):.4f}` | — | — |",
         f"| **Box IoU của TP (`mean / median`)** | `{tp_biou.get('mean', 0):.4f} / {tp_biou.get('median', 0):.4f}` | — | — |",
         f"| **Confidence TP vs FP (`mean`)** | `TP={tp_conf.get('mean', 0):.4f}` vs `FP={fp_conf.get('mean', 0):.4f}` | — | — |",
+    ]
+    domain_bd = summary.get("domain_breakdown") or {}
+    if domain_bd:
+        lines += [
+            "",
+            "### 2B. Phân Tách Điểm Theo Miền Dữ Liệu (VN vs Quốc Tế)",
+            "",
+            "| Miền Val | Số ảnh | Official Score (`100*mAP50-95`) | `mask mAP@50` | `detscore` (`100*sqrt(mAP50)`) |",
+            "| :--- | :-: | :-: | :-: | :-: |",
+        ]
+        for dom_name, dom_stats in domain_bd.items():
+            m50 = float(dom_stats.get("map50", 0.0))
+            det_sq = 100.0 * float(np.sqrt(max(0.0, m50)))
+            lines.append(
+                f"| `{dom_name}` | {dom_stats.get('n_images', 0)} | `{dom_stats.get('score', 0.0):.2f}` | `{m50:.4f}` | `{det_sq:.2f}` |"
+            )
+
+    lines += [
         "",
         "## 3. Bảng Chi Tiết 11 Lớp Trên Tập Val",
         "",
@@ -510,6 +528,28 @@ def run_benchmark(
         imgsz=sc.config.imgsz, min_area_px=sc.config.min_gt_area_px, max_det=sc.config.max_det, score_res=score_res,
     )
 
+    # Track Vietnam-domain Val performance separately from global street datasets to catch domain shift early
+    vn_markers = ("vnts", "lvnduy", "danang", "vn_", "sample_")
+    vn_imgs = [p for p in image_paths if any(m in p.stem.lower() for m in vn_markers)]
+    glb_imgs = [p for p in image_paths if not any(m in p.stem.lower() for m in vn_markers)]
+    domain_breakdown: dict[str, dict[str, Any]] = {}
+    for dom_key, dom_imgs in (("vietnam_street", vn_imgs), ("global_street", glb_imgs)):
+        if len(dom_imgs) < 3:
+            continue
+        try:
+            ds_dom = sc.score.score_split(pred_path, val_lbl_dir, [p.stem for p in dom_imgs], sc.config).to_dict()
+        except Exception:  # noqa: BLE001
+            ds_dom = _fallback_score_split(
+                pred_payload, val_lbl_dir, dom_imgs, classes,
+                imgsz=sc.config.imgsz, min_area_px=sc.config.min_gt_area_px, max_det=sc.config.max_det, rle_mod=sc.rle,
+            )
+        domain_breakdown[dom_key] = {
+            "n_images": len(dom_imgs),
+            "score": float(ds_dom.get("score", 0.0)),
+            "map50": float(ds_dom.get("map50", 0.0)),
+            "map50_95": float(ds_dom.get("map50_95", 0.0)),
+        }
+
     u_val_dict = None
     if weights_pt is not None and weights_pt.is_file() and (dataset_dir / "data.yaml").is_file():
         from ultralytics import YOLO  # noqa: PLC0415
@@ -563,6 +603,7 @@ def run_benchmark(
         "decode_ms_p50": float(np.median(infer_res.decode_ms)) if infer_res.n else 0.0,
         "output_bytes": int(infer_res.output_bytes),
         "detscore_val": det_val,
+        "domain_breakdown": domain_breakdown,
         "ultralytics_val": u_val_dict,
         "train_history": train_history,
     }

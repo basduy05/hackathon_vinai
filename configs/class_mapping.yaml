@@ -51,19 +51,52 @@ sources:
       "object--vehicle--wheeled-slow": 3
       "object--vehicle--motorcycle": 4
       "object--rider--motorcyclist": 5
+      "human--rider--motorcyclist": 5
       "object--vehicle--bicycle": 6
       "object--rider--bicyclist": 7
+      "human--rider--bicyclist": 7
       "object--person": 8
+      "human--person--individual": 8
       "object--traffic-sign--front": 9
       "object--traffic-sign--back": 9
       "object--traffic-sign--direction-front": 9
       "object--traffic-sign--direction-back": 9
       "object--traffic-sign--ambiguous": 9
+      "object--traffic-sign--information-parking": 9
+      "object--traffic-sign--temporary-front": 9
+      "object--traffic-sign--temporary-back": 9
       "object--traffic-light": 10
+      "object--traffic-light--general-single": 10
       "object--traffic-light--general-upright": 10
       "object--traffic-light--general-horizontal": 10
       "object--traffic-light--pedestrians": 10
       "object--traffic-light--cyclists": 10
+      "object--traffic-light--other": 10
+    needs_rider_merge: false
+
+  cityscapes:
+    direct_map:
+      "car": 0
+      "bus": 1
+      "truck": 2
+      "caravan": 3
+      "trailer": 3
+      "motorcycle": 4
+      "bicycle": 6
+      "person": 8
+      "rider": 8
+      "traffic sign": 9
+      "traffic light": 10
+    needs_rider_merge: true
+    rider_labels: ["rider"]
+
+  danang_vehicles:
+    direct_map:
+      "car": 0
+      "bus": 1
+      "truck": 2
+      "motorbike": 4
+      "motorcycle": 4
     needs_rider_merge: false
 
   idd:
@@ -75,7 +108,6 @@ sources:
       "autorickshaw": 3
       "caravan": 3
       "trailer": 3
-      "vehicle fallback": 3
       "motorcycle": 4
       "bicycle": 6
       "person": 8
@@ -130,7 +162,6 @@ sources:
       "cyclo": 3
       "caravan": 3
       "trailer": 3
-      "vehicle fallback": 3
       "other vehicle": 3
       "other_vehicle": 3
       "construction vehicle": 3

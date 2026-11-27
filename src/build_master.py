@@ -48,9 +48,13 @@ def build_master_dataset(
             write_yolo_seg_label(master_dir / "labels" / "val" / f"{img_p.stem}.txt", [(it.cls, it.pts) for it in insts])
             val_count += 1
 
-    seen_shas, seen_dhashes = collect_exclusion_hashes(master_dir / "images" / "val")
+    val_shas, val_dhashes = collect_exclusion_hashes(master_dir / "images" / "val")
+    seen_shas: set[str] = set(val_shas)
+    seen_dhashes: list[int] = list(val_dhashes)
 
-    # 2. Merge all staged train sources while blocking any duplicate or val leakage
+    # 2. Merge all staged train sources while blocking duplicates and val leakage.
+    # For synthetic aug_* sources (copy-paste, weather, crop-zoom), skip perceptual dhash against
+    # train backgrounds because subtle glare or small pasted objects intentionally keep background structure.
     train_count = skipped_dup = 0
     for src_root in train_sources:
         if not src_root.exists():
@@ -60,13 +64,19 @@ def build_master_dataset(
         if not t_img_dir.is_dir():
             continue
         prefix = src_root.name
+        is_aug = prefix.startswith("aug_")
         for img_p in sorted(p for p in t_img_dir.rglob("*") if p.is_file() and p.suffix.lower() in IMG_EXTS):
-            is_dup, sha, dh = is_near_duplicate(img_p, seen_shas, seen_dhashes, max_hamming=dup_hamming_max)
+            if is_aug:
+                is_val_leak, sha, dh = is_near_duplicate(img_p, val_shas, val_dhashes, max_hamming=dup_hamming_max)
+                is_dup = is_val_leak or (sha in seen_shas)
+            else:
+                is_dup, sha, dh = is_near_duplicate(img_p, seen_shas, seen_dhashes, max_hamming=dup_hamming_max)
             if is_dup:
                 skipped_dup += 1
                 continue
             seen_shas.add(sha)
-            seen_dhashes.append(dh)
+            if not is_aug:
+                seen_dhashes.append(dh)
             stem = f"{prefix}_{img_p.stem}"
             insts = read_yolo_seg_file(t_lbl_dir / f"{img_p.stem}.txt")
             transfer_image(img_p, master_dir / "images" / "train" / f"{stem}{img_p.suffix.lower()}", mode=transfer_mode)

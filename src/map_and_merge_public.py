@@ -15,12 +15,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import time
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
+import cv2
 import numpy as np
 
 from src.seg_utils import (
@@ -29,12 +31,14 @@ from src.seg_utils import (
     is_near_duplicate,
     mask_to_polygon,
     merge_polygons_union,
+    read_image_bgr,
     register_dataset_usage,
     transfer_image,
     write_data_yaml,
+    write_image,
     write_yolo_seg_label,
 )
-from src.validate_dataset import IMG_EXTS, bbox_iou, geom_iou, load_competition_config, make_shapely_polygon
+from src.validate_dataset import IMG_EXTS, bbox_iou, geom_iou, image_size, load_competition_config, make_shapely_polygon
 
 
 def load_class_mapping(path: str | Path = "configs/class_mapping.yaml") -> dict[str, Any]:
@@ -372,6 +376,131 @@ def _parse_bdd100k_dataset(
     return records
 
 
+def _parse_mapillary_v2_dataset(
+    labels_root: Path,
+    images_root: Path,
+    direct_map: dict[str, int],
+    max_images: int | None = None,
+    prioritize_classes: tuple[int, ...] = (3, 6, 7, 1, 5, 10, 4, 9),
+    seed: int = 39,
+) -> list[dict[str, Any]]:
+    """Parse Mapillary Vistas v1.2/v2.0 polygon JSONs (or 16-bit instance PNGs as fallback)."""
+    t0 = time.monotonic()
+    img_by_stem: dict[str, Path] = {}
+    for root, _, filenames in os.walk(images_root):
+        rpath = Path(root)
+        for fn in filenames:
+            if Path(fn).suffix.lower() in IMG_EXTS:
+                p = rpath / fn
+                img_by_stem[p.stem] = p
+
+    json_files = sorted(
+        p for p in labels_root.rglob("*.json")
+        if not p.name.startswith("config_")
+    )
+    if json_files:
+        prio_set = set(prioritize_classes)
+        if max_images is not None and len(json_files) > max_images:
+            # Shuffle first and stop scanning once we have enough priority candidates (~2x cap) so FUSE/disk I/O stays fast.
+            prio_labels = [k for k, v in direct_map.items() if v in prio_set]
+            pool = [jf for jf in json_files if jf.stem in img_by_stem]
+            rng = random.Random(seed)
+            rng.shuffle(pool)
+            cap = max(int(max_images * 2), int(max_images) + 400)
+            prio_files, other_files = [], []
+            for jf in pool:
+                raw_txt = jf.read_text(encoding="utf-8", errors="ignore")
+                (prio_files if any(lbl in raw_txt for lbl in prio_labels) else other_files).append(jf)
+                if len(prio_files) >= cap:
+                    break
+            json_files = (prio_files + other_files)[:cap]
+
+        print(f"  [MAPILLARY] Đang giải mã {len(json_files)} tệp polygon JSON...", flush=True)
+        records: list[dict[str, Any]] = []
+        for idx, jf in enumerate(json_files, start=1):
+            img_path = img_by_stem.get(jf.stem)
+            if img_path is None:
+                continue
+            obj = json.loads(jf.read_text(encoding="utf-8"))
+            w = int(obj.get("width") or 0)
+            h = int(obj.get("height") or 0)
+            if w <= 0 or h <= 0:
+                w, h = image_size(img_path)
+            insts: list[SegInstance] = []
+            for item in obj.get("objects", []):
+                raw_name = str(item.get("label", "")).strip().lower()
+                if raw_name not in direct_map:
+                    continue
+                raw_polys = item.get("polygons")
+                if raw_polys is None and item.get("polygon") is not None:
+                    raw_polys = [item.get("polygon")]
+                if not raw_polys:
+                    continue
+                norm_polys: list[np.ndarray] = []
+                for rp in raw_polys:
+                    arr = np.asarray(rp, dtype=np.float64)
+                    if arr.ndim != 2 or len(arr) < 3 or arr.shape[1] != 2:
+                        continue
+                    arr = arr.copy()
+                    arr[:, 0] = np.clip(arr[:, 0] / float(w), 0.0, 1.0)
+                    arr[:, 1] = np.clip(arr[:, 1] / float(h), 0.0, 1.0)
+                    if len(np.unique(np.round(arr, 6), axis=0)) >= 3:
+                        norm_polys.append(arr)
+                seg_inst = _to_seg_poly(norm_polys, int(direct_map[raw_name]), raw_name)
+                if seg_inst is not None:
+                    insts.append(seg_inst)
+            records.append({"image_path": img_path, "width": w, "height": h, "instances": insts})
+            if len(json_files) >= 500 and (idx % 500 == 0 or idx == len(json_files)):
+                print(f"  [MAPILLARY] Đã nạp {idx}/{len(json_files)} ảnh ({time.monotonic() - t0:.1f}s)", flush=True)
+        return records
+
+    # Fallback: 16-bit instance PNGs + config_v2.0.json / config_v1.2.json
+    cfg_cand = None
+    for anchor in (labels_root, labels_root.parent, labels_root.parent.parent, images_root.parent, images_root.parent.parent):
+        for name in ("config_v2.0.json", "config_v1.2.json", "config.json"):
+            p = anchor / name
+            if p.is_file():
+                cfg_cand = p
+                break
+        if cfg_cand is not None:
+            break
+    if cfg_cand is None:
+        return []
+    mcfg = json.loads(cfg_cand.read_text(encoding="utf-8"))
+    id_to_target: dict[int, tuple[int, str]] = {}
+    for cid, meta in enumerate(mcfg.get("labels", [])):
+        nm = str(meta.get("name", "")).strip().lower()
+        if nm in direct_map and meta.get("instances", True):
+            id_to_target[cid] = (int(direct_map[nm]), nm)
+
+    inst_pngs = sorted(p for p in labels_root.rglob("*.png") if p.stem in img_by_stem)
+    if max_images is not None and len(inst_pngs) > max_images * 2:
+        rng = random.Random(seed)
+        rng.shuffle(inst_pngs)
+        inst_pngs = inst_pngs[: max(int(max_images * 2), int(max_images) + 400)]
+
+    records = []
+    for png_p in inst_pngs:
+        img_path = img_by_stem.get(png_p.stem)
+        if img_path is None:
+            continue
+        inst_arr = cv2.imread(str(png_p), cv2.IMREAD_UNCHANGED)
+        if inst_arr is None or inst_arr.ndim != 2:
+            continue
+        h, w = inst_arr.shape[:2]
+        insts = []
+        for uid in np.unique(inst_arr):
+            cls_idx = int(uid) // 256
+            if cls_idx not in id_to_target:
+                continue
+            target_cls, raw_name = id_to_target[cls_idx]
+            poly = mask_to_polygon((inst_arr == uid).astype(np.uint8), w, h)
+            if poly is not None:
+                insts.append(SegInstance(cls=target_cls, pts=poly, source_label=raw_name))
+        records.append({"image_path": img_path, "width": w, "height": h, "instances": insts})
+    return records
+
+
 def convert_public_source(
     source_name: str,
     fmt: str,
@@ -385,6 +514,7 @@ def convert_public_source(
     min_area_640: float = 32.0,
     keep_empty: bool = False,
     max_images: int | None = None,
+    max_image_side: int | None = None,
     transfer_mode: str = "copy",
     weather_filter: set[str] | None = None,
     time_filter: set[str] | None = None,
@@ -414,12 +544,17 @@ def convert_public_source(
             labels_path, images_dir, direct_map,
             max_images=max_images, prioritize_classes=prioritize_classes, seed=seed,
         )
+    elif fmt == "mapillary":
+        records = _parse_mapillary_v2_dataset(
+            labels_path, images_dir, direct_map,
+            max_images=max_images, prioritize_classes=prioritize_classes, seed=seed,
+        )
     elif fmt == "idd":
         records = _parse_idd_polygons_dataset(labels_path, images_dir, direct_map)
     elif fmt == "bdd100k":
         records = _parse_bdd100k_dataset(labels_path, images_dir, direct_map, weather_filter, time_filter)
     else:
-        raise ValueError(f"Unsupported format {fmt!r} (supported: coco, idd, bdd100k)")
+        raise ValueError(f"Unsupported format {fmt!r} (supported: coco, mapillary, idd, bdd100k)")
 
     if max_images is not None and len(records) > max_images:
         prio_set = set(prioritize_classes)
@@ -478,7 +613,16 @@ def convert_public_source(
         out_stem = f"{source_name}_{rel_stem}"
         dst_img = out_img_dir / f"{out_stem}{img_path.suffix.lower()}"
         dst_lbl = out_lbl_dir / f"{out_stem}.txt"
-        transfer_image(img_path, dst_img, mode=transfer_mode)
+        if max_image_side is not None and max(w, h) > max_image_side:
+            # Downscale huge 4K street photos (e.g. Mapillary) cleanly while keeping [0, 1] polygons invariant.
+            scale = float(max_image_side) / float(max(w, h))
+            nw = max(64, int(round(w * scale)))
+            nh = max(64, int(round(h * scale)))
+            resized = cv2.resize(read_image_bgr(img_path), (nw, nh), interpolation=cv2.INTER_AREA)
+            dst_img = out_img_dir / f"{out_stem}.jpg"
+            write_image(dst_img, resized, quality=92)
+        else:
+            transfer_image(img_path, dst_img, mode=transfer_mode)
         write_yolo_seg_label(dst_lbl, [(it.cls, it.pts) for it in insts])
 
         kept_images += 1
@@ -520,7 +664,7 @@ def convert_public_source(
 def main() -> int:
     parser = argparse.ArgumentParser(description="Convert and merge public datasets to 11-class YOLO-seg.")
     parser.add_argument("--source", required=True, help="Key in configs/class_mapping.yaml (e.g. mapillary_vistas, idd, bdd100k, coco)")
-    parser.add_argument("--format", required=True, choices=["coco", "idd", "bdd100k"], help="Annotation format")
+    parser.add_argument("--format", required=True, choices=["coco", "mapillary", "idd", "bdd100k"], help="Annotation format")
     parser.add_argument("--images-dir", type=Path, required=True, help="Root folder containing source images")
     parser.add_argument("--labels", type=Path, required=True, help="JSON annotation file (coco/bdd100k) or polygons dir (idd)")
     parser.add_argument("--out-dir", type=Path, required=True, help="Destination YOLO-seg dataset directory")

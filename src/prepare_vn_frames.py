@@ -21,11 +21,12 @@ from src.seg_utils import (
     collect_exclusion_hashes,
     is_near_duplicate,
     read_image_bgr,
+    read_yolo_seg_file,
     register_dataset_usage,
     write_image,
     write_yolo_seg_label,
 )
-from src.validate_dataset import IMG_EXTS, bbox_iou, dhash64, load_competition_config
+from src.validate_dataset import IMG_EXTS, bbox_iou, dhash64, geom_iou, load_competition_config
 
 
 VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
@@ -317,6 +318,117 @@ def pseudo_label_folder(
         "hood_cars_dropped": n_hood_dropped,
         "review_queue_size": len(review_queue),
         "review_queue_path": str(queue_path),
+    }
+
+
+def complete_partial_labels_with_teacher(
+    dataset_dir: Path,
+    predictor: TeacherPredictor,
+    preserved_classes: set[int],
+    fill_classes: set[int] | None = None,
+    split: str = "train",
+    source_mapping_name: str = "coco",
+    min_conf: float = 0.28,
+    per_class_min_conf: dict[int, float] | None = None,
+    overlap_suppress_iou: float = 0.45,
+    min_area_640: float = 32.0,
+    filter_ego_hood: bool = True,
+    filter_rider_ped_overlap: bool = True,
+    keep_all_existing: bool = True,
+    mapping_path: Path = Path("configs/class_mapping.yaml"),
+    competition_path: Path = Path("configs/competition.yaml"),
+) -> dict[str, Any]:
+    """Complete missing foreground classes on partial-label datasets while preserving human GT untouched.
+
+    Prevents single/partial-class datasets (e.g. VNTS/lvnduy Sign-only or COCO missing non-stop Sign)
+    from teaching YOLO to treat unlabeled foreground vehicles/signs as negative background.
+    """
+    comp_cfg = load_competition_config(competition_path)
+    map_cfg = load_class_mapping(mapping_path)
+    classes: list[str] = comp_cfg["classes"]
+    imgsz = int(comp_cfg["competition"]["imgsz"])
+
+    if source_mapping_name not in map_cfg["sources"]:
+        direct_map = {name.lower(): idx for idx, name in enumerate(classes)}
+        needs_merge = False
+        rider_labels: set[str] = set()
+    else:
+        src_cfg = map_cfg["sources"][source_mapping_name]
+        direct_map = {str(k).strip().lower(): int(v) for k, v in src_cfg["direct_map"].items()}
+        needs_merge = bool(src_cfg.get("needs_rider_merge", False))
+        rider_labels = {str(x).strip().lower() for x in src_cfg.get("rider_labels", [])}
+
+    merge_rules = map_cfg["geometric_merge_rules"]
+    img_dir = dataset_dir / "images" / split if (dataset_dir / "images" / split).is_dir() else (dataset_dir / "images")
+    lbl_dir = dataset_dir / "labels" / split if (dataset_dir / "labels" / split).is_dir() else (dataset_dir / "labels")
+
+    allowed_fill = set(fill_classes) if fill_classes is not None else (set(range(len(classes))) - set(preserved_classes))
+    allowed_fill -= set(preserved_classes)
+    if not allowed_fill:
+        return {"images_processed": 0, "gt_kept": 0, "teacher_added_total": 0, "teacher_added_by_class": {}}
+
+    n_images = n_gt_kept = n_added = 0
+    added_by_class: dict[str, int] = {}
+
+    for img_path in sorted(p for p in img_dir.rglob("*") if p.is_file() and p.suffix.lower() in IMG_EXTS):
+        lbl_path = lbl_dir / f"{img_path.stem}.txt"
+        existing = read_yolo_seg_file(lbl_path)
+        kept_gt = list(existing) if keep_all_existing else [it for it in existing if it.cls in preserved_classes]
+
+        img_bgr = read_image_bgr(img_path)
+        h, w = img_bgr.shape[:2]
+
+        teacher_insts: list[SegInstance] = []
+        for d in predictor(img_bgr):
+            key = d.label_name.strip().lower()
+            if key not in direct_map:
+                continue
+            tc = int(direct_map[key])
+            # Allow intermediate vehicle/person detections before rider merge (e.g. 4, 6, 8 -> 5, 7)
+            conf_thr = float((per_class_min_conf or {}).get(tc, min_conf))
+            if float(d.conf) < conf_thr:
+                continue
+            seg = SegInstance(cls=tc, pts=d.pts, source_label=key)
+            if filter_ego_hood and _is_ego_hood_car(seg):
+                continue
+            if seg.area_640(w, h, imgsz) < min_area_640 * 0.6:
+                continue
+            teacher_insts.append(seg)
+
+        if needs_merge and teacher_insts:
+            teacher_insts, _, _ = apply_geometric_mask_merger(teacher_insts, merge_rules, rider_labels, img_path.name)
+            if filter_rider_ped_overlap:
+                teacher_insts = _suppress_ped_overlapping_rider(teacher_insts)
+
+        accepted: list[SegInstance] = []
+        for cand in teacher_insts:
+            if cand.cls not in allowed_fill:
+                continue
+            if cand.area_640(w, h, imgsz) < min_area_640:
+                continue
+            # Never duplicate or overwrite any existing GT object at the same location
+            overlaps_gt = any(
+                bbox_iou(cand.bbox, gt.bbox) >= overlap_suppress_iou
+                or geom_iou(cand, gt) >= 0.30
+                for gt in kept_gt
+            )
+            if overlaps_gt:
+                continue
+            accepted.append(cand)
+            cname = classes[cand.cls]
+            added_by_class[cname] = added_by_class.get(cname, 0) + 1
+            n_added += 1
+
+        merged_all = kept_gt + accepted
+        write_yolo_seg_label(lbl_path, [(it.cls, it.pts) for it in merged_all])
+        n_images += 1
+        n_gt_kept += len(kept_gt)
+
+    return {
+        "images_processed": n_images,
+        "gt_kept": n_gt_kept,
+        "teacher_added_total": n_added,
+        "teacher_added_by_class": added_by_class,
     }
 
 

@@ -128,7 +128,38 @@ def detect_dataset_format(dataset_dir: Path) -> dict[str, Any] | None:
     if not dataset_dir.is_dir():
         return None
 
-    # 1. IDD gtFine polygons
+    # 0. Mapillary Vistas v1.2 / v2.0 (polygons/*.json or instances/*.png + config_v*.json)
+    for m_cfg in list(dataset_dir.rglob("config_v2.0.json")) + list(dataset_dir.rglob("config_v1.2.json")):
+        m_root = m_cfg.parent
+        tr_imgs = m_root / "training" / "images"
+        lbl_cands = [
+            m_root / "training" / "v2.0" / "polygons",
+            m_root / "training" / "v1.2" / "polygons",
+            m_root / "training" / "v2.0" / "instances",
+            m_root / "training" / "v1.2" / "instances",
+        ]
+        tr_lbls = next((d for d in lbl_cands if d.is_dir() and any(d.iterdir())), None)
+        if tr_imgs.is_dir() and tr_lbls is not None:
+            val_imgs = m_root / "validation" / "images"
+            val_cands = [
+                m_root / "validation" / "v2.0" / "polygons",
+                m_root / "validation" / "v1.2" / "polygons",
+                m_root / "validation" / "v2.0" / "instances",
+                m_root / "validation" / "v1.2" / "instances",
+            ]
+            val_lbls = next((d for d in val_cands if d.is_dir() and any(d.iterdir())), None)
+            out: dict[str, Any] = {
+                "format": "mapillary_vistas",
+                "name": dataset_dir.name,
+                "images_dir": str(tr_imgs),
+                "labels_path": str(tr_lbls),
+            }
+            if val_imgs.is_dir() and val_lbls is not None:
+                out["val_images_dir"] = str(val_imgs)
+                out["val_labels_path"] = str(val_lbls)
+            return out
+
+    # 1. IDD / Cityscapes gtFine polygons
     for gtfine in sorted(dataset_dir.rglob("gtFine")):
         if gtfine.is_dir() and any(gtfine.rglob("*_polygons.json")):
             imgs = gtfine.parent / "leftImg8bit"
@@ -136,7 +167,9 @@ def detect_dataset_format(dataset_dir: Path) -> dict[str, Any] | None:
                 alt = [p for p in dataset_dir.rglob("leftImg8bit") if p.is_dir()]
                 imgs = alt[0] if alt else (_find_matching_image_dir(gtfine, dataset_dir) or dataset_dir)
             if imgs.is_dir():
-                return {"format": "idd_gtfine", "name": dataset_dir.name, "images_dir": str(imgs), "labels_path": str(gtfine)}
+                is_city = any(k in dataset_dir.as_posix().lower() for k in ("cityscapes", "cityspaces"))
+                fmt_name = "cityscapes_gtfine" if is_city else "idd_gtfine"
+                return {"format": fmt_name, "name": dataset_dir.name, "images_dir": str(imgs), "labels_path": str(gtfine)}
 
     # 2. BDD100K JSON
     for jf in sorted(dataset_dir.rglob("*.json")):
@@ -150,21 +183,28 @@ def detect_dataset_format(dataset_dir: Path) -> dict[str, Any] | None:
             if imgs and imgs.is_dir():
                 return {"format": "bdd100k_json", "name": dataset_dir.name, "images_dir": str(imgs), "labels_path": str(jf)}
 
-    # 3. COCO JSON (skip captions/keypoints; prioritize instances_train*.json)
+    # 3. COCO JSON (skip captions/keypoints; check BOTH file head and tail because COCO puts categories near EOF!)
     json_cands = sorted(
         (
             p for p in dataset_dir.rglob("*.json")
-            if not p.name.startswith(("captions_", "person_keypoints_"))
+            if not p.name.startswith(("captions_", "person_keypoints_", "config_"))
         ),
         key=lambda p: (0 if "train" in p.name.lower() else 1, 0 if p.name.startswith("instances_") else 1, str(p)),
     )
     for jf in json_cands:
         if jf.name.startswith("instances_") or ("train" in jf.name.lower() and jf.stat().st_size > 1000):
             try:
-                head = jf.read_text(encoding="utf-8", errors="ignore")[:1200]
+                fsize = jf.stat().st_size
+                with jf.open("rb") as fh:
+                    head = fh.read(8192).decode("utf-8", errors="ignore")
+                    tail = ""
+                    if fsize > 8192:
+                        fh.seek(max(0, fsize - 32768))
+                        tail = fh.read(32768).decode("utf-8", errors="ignore")
             except OSError:
                 continue
-            if '"categories"' in head and '"annotations"' in head:
+            blob = head + "\n" + tail
+            if '"categories"' in blob and ('"annotations"' in blob or '"images"' in blob):
                 imgs = _find_matching_image_dir(jf.parent, dataset_dir)
                 if imgs and imgs.is_dir():
                     return {"format": "coco_json", "name": dataset_dir.name, "images_dir": str(imgs), "labels_path": str(jf)}
@@ -225,7 +265,7 @@ def detect_dataset_format(dataset_dir: Path) -> dict[str, Any] | None:
 
 
 def _looks_like_dataset_root(d: Path) -> bool:
-    markers = ("data.yaml", "dataset.yaml", "classes.txt", "annotations", "gtFine", "images", "train")
+    markers = ("data.yaml", "dataset.yaml", "classes.txt", "annotations", "gtFine", "images", "train", "training", "Mapillary Vistas", "coco2017")
     return any((d / m).exists() for m in markers)
 
 
@@ -726,16 +766,28 @@ def auto_convert_detected_dataset(
             images_dir=imgs, xml_dir=lbls, out_dir=out_dir, predictor=sam_predictor,
             split=split, source_name=name, max_images=max_images, seed=seed, registry_path=registry_path,
         )
+    if fmt == "mapillary_vistas":
+        return convert_public_source(
+            "mapillary_vistas", "mapillary", imgs, lbls, out_dir, split=split, exclude_dir=exclude_dir,
+            max_images=max_images, max_image_side=1280, seed=seed, registry_path=registry_path,
+            dataset_url=ds_url or "https://www.mapillary.com/dataset/vistas", license_name="CC BY-NC-SA 4.0",
+        )
+    if fmt == "cityscapes_gtfine":
+        return convert_public_source(
+            "cityscapes", "idd", imgs, lbls, out_dir, split=split, exclude_dir=exclude_dir,
+            max_images=max_images, seed=seed, registry_path=registry_path,
+            dataset_url=ds_url or "https://www.cityscapes-dataset.com/", license_name="Academic / Non-Commercial",
+        )
     if fmt == "idd_gtfine":
         return convert_public_source(
             "idd", "idd", imgs, lbls, out_dir, split=split, exclude_dir=exclude_dir,
-            max_images=max_images, registry_path=registry_path,
+            max_images=max_images, seed=seed, registry_path=registry_path,
             dataset_url=ds_url or "http://idd.insaan.iiit.ac.in/", license_name="Academic / Research",
         )
     if fmt == "coco_json":
         return convert_public_source(
             "coco", "coco", imgs, lbls, out_dir, split=split, exclude_dir=exclude_dir,
-            max_images=max_images, registry_path=registry_path,
+            max_images=max_images, seed=seed, registry_path=registry_path,
             dataset_url=ds_url or "https://cocodataset.org", license_name="CC BY 4.0",
         )
     if fmt == "bdd100k_json":
@@ -801,6 +853,8 @@ def detect_val_split(info: dict[str, Any]) -> dict[str, Any] | None:
     imgs = Path(info["images_dir"])
     lbls = Path(info["labels_path"])
 
+    if fmt == "mapillary_vistas" and info.get("val_images_dir") and info.get("val_labels_path"):
+        return {**info, "images_dir": str(info["val_images_dir"]), "labels_path": str(info["val_labels_path"])}
     if fmt == "coco_json" and "train" in lbls.name.lower():
         val_json = lbls.parent / lbls.name.replace("train", "val")
         val_imgs = imgs.parent / imgs.name.replace("train", "val")
@@ -817,8 +871,7 @@ def detect_val_split(info: dict[str, Any]) -> dict[str, Any] | None:
         val_img = imgs.parent / imgs.name.replace("train", "val")
         if val_json.is_file() and val_img.is_dir():
             return {**info, "images_dir": str(val_img), "labels_path": str(val_json)}
-    elif fmt == "idd_gtfine":
-        # gtFine/train -> also check val if caller passed train subdir
+    elif fmt in ("idd_gtfine", "cityscapes_gtfine"):
         val_lbl = lbls / "val"
         val_img = imgs / "val"
         if val_lbl.is_dir() and val_img.is_dir():

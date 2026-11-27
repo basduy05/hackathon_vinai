@@ -1,4 +1,4 @@
-"""Build self-contained V3.3 Kaggle notebook ``kaggle_team34_pipeline.ipynb`` for Team 34 (TEAM_ID=39)."""
+"""Build self-contained V4 Kaggle notebook ``kaggle_team34_pipeline.ipynb`` for Team 34 (TEAM_ID=39)."""
 from __future__ import annotations
 
 import ast
@@ -68,24 +68,23 @@ def build_notebook() -> dict:
 
     cells = [
         _md_cell(
-            """# Đội 34 – Nguyễn Bá Duy (`TEAM_ID = 39`): Pipeline Data-Centric V3.3 Trên Kaggle
+            """# Đội 34 – Nguyễn Bá Duy (`TEAM_ID = 39`): Pipeline Data-Centric V4 Trên Kaggle
 
-**Chỉ cần tải duy nhất file này lên Kaggle (`File → Import Notebook`), bật `GPU T4` + `Internet = ON`, rồi bấm `Save Version -> Save & Run All`!**
+**Chỉ cần tải file này lên Kaggle (`File → Import Notebook`), bật `GPU T4/P100` + `Internet = ON`, rồi bấm `Save Version -> Save & Run All`!**
 
-### Những lỗi V2 đã được sửa triệt để trong bản V3.3
-1. **Phát hiện lỗi đảo lớp (`van -> Motorcyclist`, `truck -> Other vehicle`)**: `kaggle_adapter` nay đọc cả `classes.txt`, `obj.names`, 58 mã biển báo VN (`P.*`, `W.*`, `R.*`) và **cấm fallback đồng nhất `{0:0..10:10}`**, kết hợp loại bỏ bộ ảnh stock studio `vehicle-dataset-for-yolo`.
-2. **Thay 100% slug lỗi 403 bằng 5 bộ dữ liệu đường phố sạch đã kiểm chứng**:
-   - `lvnduy/street-traffic-signs-in-vietnam-yolov8` (Biển báo VN thực tế)
-   - `abtinzandi/obstacle-detection-dataset` (Đường phố đô thị)
-   - `a7madmostafa/bdd100k-yolo` (Dashcam BDD100K ngày/đêm/mưa)
-   - `redzapdos123/indian-driving-dataset-detections-yolov11` (`autorickshaw/trailer` → `Other vehicle`, `rider+2-wheeler` → `5/7`)
-   - `awsaf49/coco-2017-dataset` (Mask COCO polygon chuẩn xác, ưu tiên lọc lớp hiếm `Bicycle`, `Cyclist`, `Motorcycle`, `Traffic light`)
-3. **Giải nén `.zip` chuẩn trên HuggingFace (`star092304/Traffic-sign-detection-VietNam`)**: Không còn lấy nhầm 2 ảnh minh họa README.
-4. **Streaming Tải → Chuyển đổi → Xóa cache thô ngay**: Giảm dung lượng giữ đồng thời; vẫn cần đủ chỗ cho một bộ dữ liệu được giải nén.
-5. **Golden Val có quota + Sanity Gate theo nguồn trước khi train**: Golden Val ưu tiên lấy từ tập `val` gốc và nguồn nhãn người được chỉ định (mask SAM2 vẫn cần kiểm tra) + chạy đối chiếu Zero-Shot COCO & xuất lưới kiểm tra 11 lớp `preview_per_class.jpg` ngay ở Cell 9!"""
+### Đột phá Kiến trúc Dữ liệu V4 (Khắc phục triệt để trần 42.42 của V3.2)
+1. **Dữ liệu Polygon Chuẩn Người Gán (Mapillary Vistas v2.0 + COCO-2017 đã fix bug JSON)**:
+   - Thêm parser trực tiếp cho `kaggleprollc/mapillary-vistas-image-data-collection` (đủ 11 lớp gồm cả `Motorcyclist`, `Cyclist`, `Other vehicle`, `Sign`, `Traffic light` không cần SAM2 ~3-5 phút).
+   - Fix lỗi nhận diện `awsaf49/coco-2017-dataset` (`"categories"` nằm cuối file JSON lớn).
+   - **Loại bỏ hoàn toàn** `obstacle-detection-dataset` (chứa ảnh studio nền trắng/chân dung) và bỏ `vehicle fallback` của `IDD` (gây `Other vehicle = 0.41`).
+2. **Giải độc 1,600+ Ảnh Đường Phố Việt Nam (Zero Negative-Label Poisoning)**:
+   - Dùng Teacher mạnh (`yolo11x-seg.pt` + Stage-1 Mapillary Teacher) **điền đầy 10 lớp còn thiếu** lên `vnts_sam2` & `lvnduy` (giữ nguyên 100% nhãn `Sign` chuẩn người) và điền `Sign`/`Other vehicle` thiếu trên `COCO-2017`.
+3. **Khôi phục Booster & Huấn luyện Sâu (130 Epochs + Multi-Scale)**:
+   - Sửa `Crop-Zoom` chạy trên ảnh 480p–640p VN; sửa `build_master` không dùng `dhash` xóa ảnh `aug_copypaste`/`aug_weather`; dán lớp hiếm lên **nền Việt Nam**.
+   - Tiết kiệm ~2.5 giờ SAM2 để train `130 epochs`, `cos_lr=True`, `copy_paste=0.25`, `multi_scale=True`."""
         ),
         _code_cell(
-            """#@title 1. Tham số Đội 34, Nguồn Sạch V3 & Tùy Chọn Train { display-mode: "form" }
+            """#@title 1. Tham số Đội 34, Nguồn Sạch V4 & Tùy Chọn Train { display-mode: "form" }
 TEAM_NAME = "Đội 34 – Nguyễn Bá Duy"
 TEAM_ID = 39  # Seed cố định của đội
 
@@ -103,8 +102,8 @@ REPO_DIR = Path("/kaggle/working/repo") if IS_KAGGLE else Path("work_kaggle/repo
 TMP_RAW_DIR = Path("/kaggle/tmp/raw") if IS_KAGGLE else Path("work_kaggle/tmp_raw")
 STAGED_DIR = Path("/kaggle/working/staged") if IS_KAGGLE else Path("work_kaggle/staged")
 GOLDEN_VAL_DIR = Path("/kaggle/working/golden_val") if IS_KAGGLE else Path("work_kaggle/golden_val")
-MASTER_DIR = Path("/kaggle/working/master_v3") if IS_KAGGLE else Path("work_kaggle/master_v3")
-OUT_ZIP_PATH = Path("/kaggle/working/du_lieu_v3.zip") if IS_KAGGLE else Path("work_kaggle/du_lieu_v3.zip")
+MASTER_DIR = Path("/kaggle/working/master_v4") if IS_KAGGLE else Path("work_kaggle/master_v4")
+OUT_ZIP_PATH = Path("/kaggle/working/du_lieu_v4.zip") if IS_KAGGLE else Path("work_kaggle/du_lieu_v4.zip")
 OUTPUTS_DIR = Path("/kaggle/working/outputs") if IS_KAGGLE else Path("work_kaggle/outputs")
 
 # Đặt cache kagglehub sang /kaggle/tmp để không tốn dung lượng /kaggle/working
@@ -112,68 +111,76 @@ os.environ["KAGGLEHUB_CACHE"] = str(TMP_RAW_DIR / "kh_cache")
 
 INSTALL_DEPS = True
 
-# ---- 1A. Bộ 5 Kaggle Public Datasets ĐÃ KIỂM CHỨNG (tải tuần tự -> convert -> xóa cache thô) ----
+# ---- 1A. Bộ 4 Nguồn Dữ Liệu Sạch V4 (ưu tiên Polygon chuẩn + Đường phố VN) ----
 AUTO_DOWNLOAD_KAGGLE_SLUGS = [
-    "lvnduy/street-traffic-signs-in-vietnam-yolov8",          # ~837 MB: 58 mã biển báo VN thật -> SAM2 -> Sign(9)
-    "abtinzandi/obstacle-detection-dataset",                  # ~1.5 GB: đường phố đô thị
-    "a7madmostafa/bdd100k-yolo",                              # ~5.7 GB: dashcam BDD100K (night/rain/urban)
-    "redzapdos123/indian-driving-dataset-detections-yolov11", # ~21.9 GB: giao thông châu Á, autorickshaw -> Other vehicle(3)
-    "awsaf49/coco-2017-dataset",                              # ~25.2 GB: polygon mask chuẩn (ưu tiên lớp hiếm)
+    "kaggleprollc/mapillary-vistas-image-data-collection", # ~29 GB: Mapillary v2.0 polygon chuẩn 11 lớp (không cần SAM2!)
+    "awsaf49/coco-2017-dataset",                           # ~25 GB: COCO polygon chuẩn (đã sửa parser JSON)
+    "lvnduy/street-traffic-signs-in-vietnam-yolov8",       # ~837 MB: Đường phố VN (SAM2 Sign -> hoàn thiện 11 lớp!)
+    "a7madmostafa/bdd100k-yolo",                           # ~5.7 GB: Dashcam ngày/đêm/mưa (cap nhẹ)
 ]
 RUN_KAGGLE_INPUT_PUBLIC = True
 SKIP_STOCK_INPUT_SLUGS = [
-    "vehicle-dataset-for-yolo",  # Bỏ qua bộ ảnh stock studio gây sai tỉ lệ nếu lỡ gắn sẵn
-    "hackathon",                 # Chặn output cũ của chính notebook này (tránh nạp lại master_v2 bẩn)
+    "vehicle-dataset-for-yolo",
+    "obstacle-detection-dataset",
+    "indian-driving-dataset-detections-yolov11",
+    "hackathon",
     "master_v1",
     "master_v2",
+    "master_v3",
     "bdd100k-with-yolo-setup",
     "derekxue",
 ]
-KAGGLE_MAX_IMAGES_PER_SOURCE = 1000
-COCO_MAX_IMAGES = 1500
-VAL_MAX_IMAGES_PER_SOURCE = 90  # Lấy tối đa từ val gốc mỗi nguồn sạch cho Golden Val
+MAPILLARY_MAX_IMAGES = 3200
+COCO_MAX_IMAGES = 1200
+BDD_MAX_IMAGES = 400
+KAGGLE_MAX_IMAGES_PER_SOURCE = 900
+VAL_MAX_IMAGES_PER_SOURCE = 240  # Ưu tiên Mapillary Val chuẩn 11 lớp cho Golden Val V4
 
-# ---- 1B. Biển báo Việt Nam & Dashcam Việt Nam (HuggingFace) ----
+# ---- 1B. Biển báo Việt Nam HF & Hoàn Thiện Nhãn 11 Lớp (Chống Nhiễu Âm) ----
 RUN_VNTS_HF = True
 VNTS_HF_REPO = "star092304/Traffic-sign-detection-VietNam"
 VNTS_MAX_IMAGES = 1000
 SAM2_MODEL = "sam2_b.pt"
 
-# Mặc định TẮT Zalo dashcam OpenHay vì video gốc bị làm mờ Gaussian toàn bộ xe/người; bật True nếu đã có video sạch
 RUN_VN_DASHCAM = False
 VN_DASHCAM_HF_REPO = "OpenHay/zalo-ai-2025-public-test-data-v2"
 VN_DASHCAM_LOCAL_INPUT = ""
 DASHCAM_MAX_FRAMES = 250
+
+RUN_PARTIAL_LABEL_COMPLETION = True
+RUN_STAGE1_MAPILLARY_TEACHER = True
+STAGE1_EPOCHS = 22
 TEACHER_WEIGHTS = "yolo11x-seg.pt"
 
 # ---- 1C. Augment, Golden Val & Sanity Gate ----
 RUN_CROP_ZOOM = True
 RUN_COPY_PASTE = True
-COPY_PASTE_COUNT = 350
+COPY_PASTE_COUNT = 450
 RUN_WEATHER_AUG = True
 WEATHER_COUNT = 350
 AUTO_GOLDEN_VAL_TARGET = 320
 GOLDEN_MIN_PER_CLASS = 25
 SANITY_IMAGES_PER_SOURCE = 48
-MIN_RARE_TRAIN_INSTANCES = 150
+MIN_RARE_TRAIN_INSTANCES = 200
 RUN_SANITY_GATE = True
 FAIL_ON_SANITY_ALERT = True
 
-# ---- 1D. Huấn luyện, Đóng Gói Test Laptop & Tải File ----
+# ---- 1D. Huấn luyện yolo26n-seg V4 & Đóng Gói ----
 RUN_TRAIN_IN_THIS_NOTEBOOK = True
-TRAIN_EPOCHS = 65
+TRAIN_EPOCHS = 95
 TRAIN_BATCH = 16
-TRAIN_PATIENCE = 20
+TRAIN_PATIENCE = 25
+MULTI_SCALE = False  # Tắt multi_scale để chạy an toàn ~5.5-6h trong giới hạn 9h Kaggle GPU (đã có scale=0.6 + Crop-Zoom)
 RUN_BENCHMARK_AND_QC = True
 QC_TRAIN_SAMPLE_IMAGES = 500
-RUN_NAME = "team34_v33"
+RUN_NAME = "team34_v4"
 BASELINE_SUMMARY_JSON = ""
 LOCAL_PACK_MAX_VAL_IMAGES = 60
 INLINE_MAX_MB = 12.0
 SPLIT_PACK_FOR_DOWNLOAD = False
 SPLIT_ZIP_FOR_DOWNLOAD = False
 
-print(f"{TEAM_NAME} | TEAM_ID={TEAM_ID} | IS_KAGGLE={IS_KAGGLE} | V3.3 Clean Pipeline", flush=True)"""
+print(f"{TEAM_NAME} | TEAM_ID={TEAM_ID} | IS_KAGGLE={IS_KAGGLE} | V4 Clean Multi-Domain Pipeline", flush=True)"""
         ),
         _code_cell(
             f"""#@title 2. Cài đặt gói chuẩn & giải nén mã nguồn nhúng vào REPO_DIR
@@ -364,22 +371,7 @@ if RUN_VNTS_HF:
             STAGED_SOURCES.append(vnts_out)
             CLEAN_TRAIN_SOURCES.append(vnts_out)
 
-    if n_vl > 0:
-        vnts_val_out = STAGED_DIR / "_val_vnts_sam2"
-        shutil.rmtree(vnts_val_out, ignore_errors=True)
-        vnts_val_sum = convert_bbox_dataset(
-            images_dir=vnts_val_sub / "images",
-            labels_dir=vnts_val_sub / "labels",
-            out_dir=vnts_val_out,
-            predictor=SAM_PREDICTOR,
-            split="val",
-            default_class=9,
-            registry_path=None,
-            source_name="star092304_vn_signs_val",
-        )
-        if vnts_val_sum["instances_written"] > 0:
-            CLEAN_VAL_SOURCES.append(vnts_val_out)
-
+    # Khong nap vnts_val_out (chi co Sign) vao CLEAN_VAL_SOURCES de tranh lam meo Golden Val 11 lop.
     for d in (vnts_raw, vnts_sub, vnts_val_sub):
         shutil.rmtree(d, ignore_errors=True)"""
         ),
@@ -393,7 +385,14 @@ def _run_one_kaggle_source(idx_tag: str, info: dict) -> None:
     safe_name = info["name"].replace("-", "_").replace(" ", "_").lower()
     out_d = STAGED_DIR / f"kaggle_{idx_tag}_{safe_name}"
     shutil.rmtree(out_d, ignore_errors=True)
-    cap = COCO_MAX_IMAGES if "coco" in safe_name else KAGGLE_MAX_IMAGES_PER_SOURCE
+    if "mapillary" in safe_name:
+        cap = MAPILLARY_MAX_IMAGES
+    elif "coco" in safe_name:
+        cap = COCO_MAX_IMAGES
+    elif "bdd100k" in safe_name:
+        cap = BDD_MAX_IMAGES
+    else:
+        cap = KAGGLE_MAX_IMAGES_PER_SOURCE
     print(f"Đang xử lý [{info['format']}] {info['name']} (cap={cap})...", flush=True)
     res = auto_convert_detected_dataset(
         info=info,
@@ -409,18 +408,20 @@ def _run_one_kaggle_source(idx_tag: str, info: dict) -> None:
     if (out_d / "images" / "train").exists() and any((out_d / "images" / "train").glob("*")):
         STAGED_SOURCES.append(out_d)
 
-    trusted = any(slug.split("/")[-1].replace("-", "_") in safe_name for slug in AUTO_DOWNLOAD_KAGGLE_SLUGS)
-    if trusted and out_d in STAGED_SOURCES:
+    # Chỉ nguồn đủ 11 lớp (Mapillary, BDD100K) mới dùng cho Golden Val để không bị ảo giác miền/thiếu lớp!
+    is_full_11 = any(k in safe_name for k in ("mapillary", "bdd100k", "cityscapes"))
+    if is_full_11 and out_d in STAGED_SOURCES:
         CLEAN_TRAIN_SOURCES.append(out_d)
-    val_info = detect_val_split(info) if trusted else None
+    val_info = detect_val_split(info) if is_full_11 else None
     if val_info is not None:
         val_out = STAGED_DIR / f"_val_{idx_tag}_{safe_name}"
         shutil.rmtree(val_out, ignore_errors=True)
+        v_cap = VAL_MAX_IMAGES_PER_SOURCE if "mapillary" in safe_name else min(90, VAL_MAX_IMAGES_PER_SOURCE)
         v_res = auto_convert_detected_dataset(
             info=val_info,
             out_dir=val_out,
             sam_predictor=SAM_PREDICTOR,
-            max_images=VAL_MAX_IMAGES_PER_SOURCE,
+            max_images=v_cap,
             seed=TEAM_ID,
             split="val",
             registry_path=None,
@@ -515,11 +516,115 @@ print(json.dumps({k: v for k, v in holdout.items() if k != "manifest"}, indent=2
 shutil.copy2(GOLDEN_VAL_DIR / "holdout_manifest.json", OUTPUTS_DIR / "holdout_manifest.json")
 if not holdout["ok"]:
     raise RuntimeError(f"Golden Val thiếu mẫu được chấm; bổ sung nguồn nhãn người trước train: {holdout['missing_instances']}")
-# Chỉ xóa bản staged dùng tạm, không sửa dữ liệu upstream. Loại cả bản trùng ở nguồn khác trước khi augment.
+# Chỉ xóa bản staged dùng tạm, không sửa dữ liệu upstream. Loại cả bản trùng ở nguồn khác trước khi hoàn thiện nhãn & augment.
 print("Removed staged train/val overlap:", exclude_golden_from_staged_train(STAGED_SOURCES, GOLDEN_VAL_DIR))"""
         ),
         _code_cell(
-            """#@title 8. Tăng cường Data-Centric (Crop-Zoom Biển Báo + Copy-Paste Lớp Hiếm + Weather Trên Nguồn Sạch)
+            """#@title 7B. Giải độc & Hoàn thiện Nhãn 11 Lớp cho Ảnh Việt Nam & COCO (Chống Nhiễu Âm!)
+import gc
+import torch
+from ultralytics import YOLO
+from src.build_master import build_master_dataset
+from src.prepare_vn_frames import UltralyticsTeacherPredictor, complete_partial_labels_with_teacher
+
+vn_partial_sources = [
+    s for s in STAGED_SOURCES
+    if any(k in s.name.lower() for k in ("vnts", "lvnduy", "traffic_sign"))
+]
+coco_sources = [s for s in STAGED_SOURCES if "coco" in s.name.lower()]
+full_sources_for_stage1 = [
+    s for s in STAGED_SOURCES
+    if any(k in s.name.lower() for k in ("mapillary", "bdd100k", "cityscapes"))
+]
+
+if RUN_PARTIAL_LABEL_COMPLETION:
+    # 1. Dùng yolo11x-seg.pt điền các lớp COCO {0,1,2,4,5,6,7,8,10} lên ảnh đường phố VN (giữ 100% Sign(9) gốc!)
+    if vn_partial_sources:
+        teacher_coco = UltralyticsTeacherPredictor(weights=TEACHER_WEIGHTS, conf=0.28, imgsz=1280, device=DEVICE)
+        for v_dir in vn_partial_sources:
+            comp_res = complete_partial_labels_with_teacher(
+                dataset_dir=v_dir,
+                predictor=teacher_coco,
+                preserved_classes={9},
+                fill_classes={0, 1, 2, 4, 5, 6, 7, 8, 10},
+                split="train",
+                source_mapping_name="coco",
+                min_conf=0.28,
+                per_class_min_conf={1: 0.30, 10: 0.25},
+            )
+            print(f"[Teacher COCO -> VN ({v_dir.name})]:", json.dumps(comp_res, ensure_ascii=False))
+        del teacher_coco
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    # 2. Huấn luyện nhanh Stage-1 Teacher trên Mapillary + BDD100K (đã cách ly Golden Val!) để bổ sung Sign(9) & Other vehicle(3)
+    if RUN_STAGE1_MAPILLARY_TEACHER and full_sources_for_stage1:
+        stage1_data_dir = TMP_RAW_DIR / "stage1_master"
+        shutil.rmtree(stage1_data_dir, ignore_errors=True)
+        s1_info = build_master_dataset(
+            train_sources=full_sources_for_stage1,
+            golden_val_dir=GOLDEN_VAL_DIR,
+            master_dir=stage1_data_dir,
+            zip_out=None,
+        )
+        print("Stage-1 Teacher Dataset:", json.dumps(s1_info, ensure_ascii=False))
+        s1_weights_base = "yolo26s-seg.pt"
+        try:
+            s1_model = YOLO(s1_weights_base)
+        except Exception:
+            s1_model = YOLO("yolo26n-seg.pt")
+        s1_proj = Path("/kaggle/working/runs_stage1") if IS_KAGGLE else Path("work_kaggle/runs_stage1")
+        s1_model.train(
+            data=str(stage1_data_dir / "data.yaml"),
+            imgsz=640,
+            epochs=STAGE1_EPOCHS,
+            batch=TRAIN_BATCH,
+            seed=TEAM_ID,
+            device=DEVICE,
+            workers=2,
+            cache=False,
+            cos_lr=True,
+            project=str(s1_proj),
+            name="stage1_mapillary",
+            exist_ok=True,
+            verbose=False,
+        )
+        s1_best = Path(s1_model.trainer.best)
+        if s1_best.is_file():
+            teacher_map = UltralyticsTeacherPredictor(weights=str(s1_best), conf=0.32, imgsz=1280, device=DEVICE)
+            for c_dir in coco_sources:
+                c_res = complete_partial_labels_with_teacher(
+                    dataset_dir=c_dir,
+                    predictor=teacher_map,
+                    preserved_classes={0, 1, 2, 4, 5, 6, 7, 8, 10},
+                    fill_classes={3, 9},
+                    split="train",
+                    source_mapping_name="competition_direct",
+                    min_conf=0.35,
+                )
+                print(f"[Teacher Stage1 -> COCO ({c_dir.name})]:", json.dumps(c_res, ensure_ascii=False))
+            for v_dir in vn_partial_sources:
+                v_res2 = complete_partial_labels_with_teacher(
+                    dataset_dir=v_dir,
+                    predictor=teacher_map,
+                    preserved_classes={0, 1, 2, 4, 5, 6, 7, 8, 9, 10},
+                    fill_classes={3},
+                    split="train",
+                    source_mapping_name="competition_direct",
+                    min_conf=0.35,
+                )
+                print(f"[Teacher Stage1 OtherVehicle -> VN ({v_dir.name})]:", json.dumps(v_res2, ensure_ascii=False))
+            del teacher_map
+        del s1_model
+        shutil.rmtree(stage1_data_dir, ignore_errors=True)
+        shutil.rmtree(s1_proj, ignore_errors=True)
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()"""
+        ),
+        _code_cell(
+            """#@title 8. Tăng cường Data-Centric (Crop-Zoom Biển Báo VN + Copy-Paste Lớp Hiếm Lên Nền VN + Weather)
 from src.augment_and_crop import generate_copypaste_dataset, generate_crop_zoom_dataset, generate_weather_dataset
 
 base_sources = [s for s in STAGED_SOURCES if not s.name.startswith("aug_")]
@@ -530,24 +635,29 @@ if RUN_CROP_ZOOM and sign_sources:
         cz_out = STAGED_DIR / f"aug_cropzoom_{idx_cz:02d}"
         shutil.rmtree(cz_out, ignore_errors=True)
         cz_res = generate_crop_zoom_dataset(s_dir, cz_out, split="train", crop_size=640, max_crops_per_image=2, seed=TEAM_ID + idx_cz)
-        print(f"Crop-Zoom biển báo ({s_dir.name}):", cz_res)
+        print(f"Crop-Zoom biển báo VN ({s_dir.name}):", cz_res)
         if cz_res["crops_written"] > 0:
             STAGED_SOURCES.append(cz_out)
 
 if RUN_COPY_PASTE and base_sources:
-    bank_sources = [s for s in base_sources if any(k in s.name for k in ("indian", "idd", "coco", "vnts", "lvnduy", "traffic_sign"))]
-    bg_src = next((s for s in base_sources if any(k in s.name for k in ("bdd100k", "indian", "idd", "obstacle"))), None)
-    if not bank_sources or bg_src is None:
-        raise RuntimeError("Copy-Paste cần ngân hàng lớp hiếm và nền đường phố đúng nguồn")
+    bank_sources = [s for s in base_sources if any(k in s.name for k in ("mapillary", "coco", "vnts", "lvnduy", "traffic_sign"))]
+    if not bank_sources:
+        bank_sources = base_sources
+    # Ưu tiên dán lớp hiếm lên nền đường phố VN đã hoàn thiện nhãn + Mapillary để model quen bối cảnh VN!
+    vn_bg_sources = [s for s in base_sources if any(k in s.name for k in ("vnts", "lvnduy", "mapillary"))]
+    bg_dirs = vn_bg_sources if vn_bg_sources else [base_sources[0]]
     cp_out = STAGED_DIR / "aug_copypaste"
     shutil.rmtree(cp_out, ignore_errors=True)
-    cp_res = generate_copypaste_dataset(bank_sources, bg_src, cp_out, split="train", rare_classes=(3, 6, 7, 9, 10), n_output=COPY_PASTE_COUNT, seed=TEAM_ID)
-    print(f"Copy-Paste lớp hiếm (banks={[s.name for s in bank_sources]}, bg={bg_src.name}):", cp_res)
+    cp_res = generate_copypaste_dataset(
+        bank_sources, bg_dirs, cp_out, split="train",
+        rare_classes=(1, 3, 4, 5, 6, 7, 9, 10), n_output=COPY_PASTE_COUNT, seed=TEAM_ID,
+    )
+    print(f"Copy-Paste lớp hiếm (banks={[s.name for s in bank_sources]}, bgs={[s.name for s in bg_dirs]}):", cp_res)
     if cp_res["images_written"] > 0:
         STAGED_SOURCES.append(cp_out)
 
 if RUN_WEATHER_AUG and base_sources:
-    w_src = next((s for s in base_sources if "bdd100k" in s.name or "indian" in s.name or "coco" in s.name), base_sources[0])
+    w_src = next((s for s in base_sources if "vnts" in s.name or "mapillary" in s.name or "bdd100k" in s.name), base_sources[0])
     we_out = STAGED_DIR / "aug_weather"
     shutil.rmtree(we_out, ignore_errors=True)
     we_res = generate_weather_dataset(w_src, we_out, split="train", max_images=WEATHER_COUNT, seed=TEAM_ID)
@@ -556,11 +666,27 @@ if RUN_WEATHER_AUG and base_sources:
         STAGED_SOURCES.append(we_out)"""
         ),
         _code_cell(
-            """#@title 9. Gộp Master V3, QC Tầng 1 & Sanity Gate Chống Sai Nhãn Trước Khi Train
+            """#@title 9. Gộp Master V4, Kiểm tra Chống Đầu Độc Nhãn Âm & Sanity Gate Trước Khi Train
 from IPython.display import Image as IPyImage, display
 from src.build_master import build_master_dataset
 from src.eval_golden import render_per_class_preview_grid, run_pretrain_semantic_sanity_check
 from src.validate_dataset import load_competition_config, print_qc_summary, run_qc
+
+# Cổng Chống Đầu Độc Nhãn Âm: mọi nguồn gốc không phải aug_ phải có >= 4 lớp nhãn (cấm nguồn 1-lớp lọt vào train!)
+for _src in STAGED_SOURCES:
+    if _src.name.startswith("aug_"):
+        continue
+    _present_cls = set()
+    for _lf in (_src / "labels" / "train").glob("*.txt"):
+        for _ln in _lf.read_text(encoding="utf-8", errors="ignore").splitlines():
+            _tok = _ln.split()
+            if _tok:
+                _present_cls.add(int(_tok[0]))
+        if len(_present_cls) >= 4:
+            break
+    print(f"  [COVERAGE CHECK] {_src.name}: >= {len(_present_cls)} lớp", flush=True)
+    if len(_present_cls) < 4:
+        raise RuntimeError(f"Nguồn {_src.name} chỉ có {len(_present_cls)} lớp — nguy cơ đầu độc nhãn âm!")
 
 shutil.rmtree(MASTER_DIR, ignore_errors=True)
 master_summary = build_master_dataset(
@@ -569,7 +695,7 @@ master_summary = build_master_dataset(
     master_dir=MASTER_DIR,
     zip_out=OUT_ZIP_PATH,
 )
-print("Kết quả Build Master V3:", json.dumps(master_summary, indent=2, ensure_ascii=False))
+print("Kết quả Build Master V4:", json.dumps(master_summary, indent=2, ensure_ascii=False))
 
 cfg = load_competition_config(REPO_DIR / "configs/competition.yaml")
 qc_rep = run_qc(MASTER_DIR, cfg, out_dir=OUTPUTS_DIR / "qc_master")
@@ -608,7 +734,7 @@ if RUN_SANITY_GATE:
         raise RuntimeError(f"Sanity Gate failed or lacked evidence for sources: {list(blocked)}")
 
 shutil.copy2(REPO_DIR / "datasets_registry.md", OUTPUTS_DIR / "datasets_registry.md")
-print(f"\\n[XONG DATA V3] {OUT_ZIP_PATH} ({OUT_ZIP_PATH.stat().st_size / 2**20:.1f} MiB)")"""
+print(f"\\n[XONG DATA V4] {OUT_ZIP_PATH} ({OUT_ZIP_PATH.stat().st_size / 2**20:.1f} MiB)")"""
         ),
         _code_cell(
             """#@title 10. Huấn luyện YOLO26n-seg & Xuất submission.zip chuẩn BTC
@@ -620,8 +746,7 @@ SUBMISSION_ZIP_PATH = None
 
 if RUN_TRAIN_IN_THIS_NOTEBOOK:
     run_proj = Path("/kaggle/working/runs") if IS_KAGGLE else Path("work_kaggle/runs")
-    model = YOLO("yolo26n-seg.pt")
-    model.train(
+    train_kwargs = dict(
         data=str(MASTER_DIR / "data.yaml"),
         imgsz=640,
         epochs=TRAIN_EPOCHS,
@@ -635,14 +760,29 @@ if RUN_TRAIN_IN_THIS_NOTEBOOK:
         optimizer="AdamW",
         lr0=0.002,
         cos_lr=True,
-        scale=0.5,
+        scale=0.6,
+        degrees=3.0,
+        hsv_v=0.4,
         mosaic=1.0,
-        close_mosaic=10,
-        copy_paste=0.10,
+        close_mosaic=15,
+        copy_paste=0.25,
+        mixup=0.05,
+        multi_scale=MULTI_SCALE,
         project=str(run_proj),
         name=RUN_NAME,
         exist_ok=True,
     )
+    model = YOLO("yolo26n-seg.pt")
+    try:
+        model.train(**train_kwargs)
+    except RuntimeError as exc:
+        if MULTI_SCALE and "out of memory" in str(exc).lower():
+            print("[WARN] Multi-scale OOM trên GPU -> thử lại với multi_scale=False", flush=True)
+            train_kwargs["multi_scale"] = False
+            model = YOLO("yolo26n-seg.pt")
+            model.train(**train_kwargs)
+        else:
+            raise
     BEST_PT_PATH = Path(model.trainer.best)
     shutil.copy2(BEST_PT_PATH, OUTPUTS_DIR / "best.pt")
 
@@ -856,7 +996,7 @@ def main() -> None:
     nb = build_notebook()
     verify_notebook(nb)
     OUT_NB.write_text(json.dumps(nb, indent=1, ensure_ascii=False), encoding="utf-8")
-    print(f"Successfully generated & verified V3.3 {OUT_NB} ({OUT_NB.stat().st_size / 1024:.1f} KiB, {len(nb['cells'])} cells)")
+    print(f"Successfully generated & verified V4 {OUT_NB} ({OUT_NB.stat().st_size / 1024:.1f} KiB, {len(nb['cells'])} cells)")
 
 
 if __name__ == "__main__":

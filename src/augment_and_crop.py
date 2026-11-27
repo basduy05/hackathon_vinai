@@ -73,8 +73,8 @@ def generate_crop_zoom_dataset(
     target_classes: tuple[int, ...] = (3, 6, 7, 9, 10),
     crop_size: int = 640,
     max_crops_per_image: int = 2,
-    min_target_area_640: float = 16.0,
-    max_target_area_640: float = 500.0,
+    min_target_area_640: float = 12.0,
+    max_target_area_640: float = 1200.0,
     seed: int = 39,
     competition_path: Path = Path("configs/competition.yaml"),
 ) -> dict[str, Any]:
@@ -98,8 +98,10 @@ def generate_crop_zoom_dataset(
             continue
         img_bgr = read_image_bgr(img_path)
         h, w = img_bgr.shape[:2]
-        if min(w, h) < crop_size + 40:
+        if min(w, h) < 280:
             continue
+        # On 480p-640p images (e.g. Roboflow VN signs), crop a tighter region and zoom cleanly to crop_size.
+        eff_crop = crop_size if min(w, h) >= crop_size + 20 else max(256, int(round(min(w, h) * 0.62)))
 
         anchors = [
             it for it in insts
@@ -114,19 +116,21 @@ def generate_crop_zoom_dataset(
             if len(chosen_boxes) >= max_crops_per_image:
                 break
             ax1, ay1, ax2, ay2 = anc.bbox
-            acx = int(round(0.5 * (ax1 + ax2) * w)) + rng.randint(-crop_size // 6, crop_size // 6)
-            acy = int(round(0.5 * (ay1 + ay2) * h)) + rng.randint(-crop_size // 6, crop_size // 6)
-            x1 = max(0, min(w - crop_size, acx - crop_size // 2))
-            y1 = max(0, min(h - crop_size, acy - crop_size // 2))
-            x2, y2 = x1 + crop_size, y1 + crop_size
+            acx = int(round(0.5 * (ax1 + ax2) * w)) + rng.randint(-eff_crop // 6, eff_crop // 6)
+            acy = int(round(0.5 * (ay1 + ay2) * h)) + rng.randint(-eff_crop // 6, eff_crop // 6)
+            x1 = max(0, min(w - eff_crop, acx - eff_crop // 2))
+            y1 = max(0, min(h - eff_crop, acy - eff_crop // 2))
+            x2, y2 = x1 + eff_crop, y1 + eff_crop
             # Avoid overlapping crops on same image
-            if any(abs(x1 - px1) < crop_size * 0.4 and abs(y1 - py1) < crop_size * 0.4 for px1, py1, _, _ in chosen_boxes):
+            if any(abs(x1 - px1) < eff_crop * 0.4 and abs(y1 - py1) < eff_crop * 0.4 for px1, py1, _, _ in chosen_boxes):
                 continue
             clipped_insts = _clip_instances_to_crop(insts, w, h, x1, y1, x2, y2, imgsz=imgsz)
             if not clipped_insts:
                 continue
             chosen_boxes.append((x1, y1, x2, y2))
             crop_img = img_bgr[y1:y2, x1:x2]
+            if eff_crop != crop_size:
+                crop_img = cv2.resize(crop_img, (crop_size, crop_size), interpolation=cv2.INTER_CUBIC)
             stem = f"cropzoom_{img_path.stem}_{len(chosen_boxes)}"
             write_image(out_img_dir / f"{stem}.jpg", crop_img)
             write_yolo_seg_label(out_lbl_dir / f"{stem}.txt", clipped_insts)
@@ -215,10 +219,10 @@ def generate_weather_dataset(
 
 def generate_copypaste_dataset(
     bank_dir: Path | list[Path],
-    bg_dir: Path,
+    bg_dir: Path | list[Path],
     out_dir: Path,
     split: str = "train",
-    rare_classes: tuple[int, ...] = (3, 6, 7, 9, 10),
+    rare_classes: tuple[int, ...] = (1, 3, 4, 5, 6, 7, 9, 10),
     n_output: int = 200,
     pastes_per_image: tuple[int, int] = (2, 4),
     max_bg_overlap_iou: float = 0.15,
@@ -238,15 +242,20 @@ def generate_copypaste_dataset(
         bank_lbl_dir = root / "labels" / split if (root / "labels" / split).is_dir() else root / "labels"
         for img_p in sorted(p for p in bank_img_dir.rglob("*") if p.is_file() and p.suffix.lower() in IMG_EXTS):
             for it in read_yolo_seg_file(bank_lbl_dir / f"{img_p.stem}.txt"):
-                if it.cls in rare_classes:
+                if it.cls in rare_classes and polygon_area(it.pts) <= 0.30:
                     bank_items.append((img_p, it.cls, it.pts))
     if not bank_items:
         return {"mode": "copy-paste", "images_written": 0, "pasted_instances": 0, "reason": "empty_instance_bank"}
 
-    bg_img_dir = bg_dir / "images" / split if (bg_dir / "images" / split).is_dir() else (bg_dir / "images")
-    bg_lbl_dir = bg_dir / "labels" / split if (bg_dir / "labels" / split).is_dir() else (bg_dir / "labels")
-    bg_imgs = sorted(p for p in bg_img_dir.rglob("*") if p.is_file() and p.suffix.lower() in IMG_EXTS)
-    if not bg_imgs:
+    bg_dirs = [bg_dir] if isinstance(bg_dir, Path) else list(bg_dir)
+    bg_entries: list[tuple[Path, Path]] = []
+    for broot in bg_dirs:
+        b_img_dir = broot / "images" / split if (broot / "images" / split).is_dir() else (broot / "images")
+        b_lbl_dir = broot / "labels" / split if (broot / "labels" / split).is_dir() else (broot / "labels")
+        for p in sorted(b_img_dir.rglob("*")):
+            if p.is_file() and p.suffix.lower() in IMG_EXTS:
+                bg_entries.append((p, b_lbl_dir / f"{p.stem}.txt"))
+    if not bg_entries:
         return {"mode": "copy-paste", "images_written": 0, "pasted_instances": 0, "reason": "empty_backgrounds"}
 
     out_img_dir = out_dir / "images" / split
@@ -261,10 +270,10 @@ def generate_copypaste_dataset(
     available_classes = sorted(bank_by_class)
     images_written = total_pasted = 0
     for out_idx in range(n_output):
-        bg_path = rng.choice(bg_imgs)
+        bg_path, bg_lbl_path = rng.choice(bg_entries)
         bg_bgr = read_image_bgr(bg_path).copy()
         bh, bw = bg_bgr.shape[:2]
-        bg_insts = read_yolo_seg_file(bg_lbl_dir / f"{bg_path.stem}.txt")
+        bg_insts = read_yolo_seg_file(bg_lbl_path)
         final_insts: list[tuple[int, np.ndarray]] = [(it.cls, it.pts) for it in bg_insts]
         occupied_boxes = [it.bbox for it in bg_insts]
 
